@@ -1,0 +1,389 @@
+---
+title: "Feature_engineering"
+author: "Loih"
+date: "2026-01-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("R/R_setup.R")
+```
+
+
+```{r}
+dt <- fread("output/user_action_clean.csv", na.strings = c("", "NA", "NaN", "NULL"))
+setnames(dt, tolower(names(dt)))
+
+need_cols <- c("user_id","item_id","behavior_type","item_category","time")
+miss_cols <- setdiff(need_cols, names(dt))
+if (length(miss_cols) > 0) stop(paste("Missing:", paste(miss_cols, collapse=", ")))
+
+dt[, `:=`(
+  user_id       = str_trim(as.character(user_id)),
+  item_id       = str_trim(as.character(item_id)),
+  behavior_type = as.integer(behavior_type),
+  item_category = as.integer(item_category),
+  time_raw      = str_trim(gsub("/", "-", as.character(time)))
+)]
+dt[, time_parsed := as.POSIXct(time_raw, format = "%Y-%m-%d %H", tz = "UTC")]
+
+dt <- dt[!(is.na(user_id) | user_id=="" |
+           is.na(item_id) | item_id=="" |
+           is.na(behavior_type) |
+           is.na(item_category) |
+           is.na(time_parsed))]
+
+dt[, `:=`(
+  date = as.Date(time_parsed),
+  hour = as.integer(format(time_parsed, "%H")),
+  dow  = as.integer(format(time_parsed, "%u"))  # 1=Mon,...,7=Sun
+)]
+
+time_max <- dt[, max(time_parsed)]
+eps <- 1e-9
+
+
+#时间窗口
+dt[, days_to_end := as.numeric(difftime(time_max, time_parsed, units = "days"))]
+dt[, `:=`(
+  in_1d = days_to_end <= 1,
+  in_3d = days_to_end <= 3,
+  in_7d = days_to_end <= 7
+)]
+
+
+#user-level 特征
+u_cnt <- dt[, .(
+  u_act_total = .N,
+  u_view = sum(behavior_type==1L),
+  u_fav  = sum(behavior_type==2L),
+  u_cart = sum(behavior_type==3L),
+  u_buy  = sum(behavior_type==4L),
+  u_item_nunique = uniqueN(item_id),
+  u_cat_nunique  = uniqueN(item_category),
+  u_day_nunique  = uniqueN(date),
+  u_hour_nunique = uniqueN(hour),
+  u_first_time = min(time_parsed),
+  u_last_time  = max(time_parsed)
+), by = user_id]
+
+u_cnt[, `:=`(
+  u_buy_rate  = u_buy  / (u_view + eps),
+  u_cart_rate = u_cart / (u_view + eps),
+  u_fav_rate  = u_fav  / (u_view + eps),
+  u_buy_share = u_buy  / (u_act_total + eps)
+)]
+
+u_pref_hour <- dt[, .N, by = .(user_id, hour)][order(user_id, -N)]
+u_pref_hour <- u_pref_hour[, .SD[1], by = user_id][, .(user_id, u_pref_hour = hour)]
+
+u_pref_dow <- dt[, .N, by = .(user_id, dow)][order(user_id, -N)]
+u_pref_dow <- u_pref_dow[, .SD[1], by = user_id][, .(user_id, u_pref_dow = dow)]
+
+u_win <- dt[, .(
+  u_act_1d = sum(in_1d),
+  u_act_3d = sum(in_3d),
+  u_act_7d = sum(in_7d),
+  u_buy_1d = sum(in_1d & behavior_type==4L),
+  u_buy_3d = sum(in_3d & behavior_type==4L),
+  u_buy_7d = sum(in_7d & behavior_type==4L)
+), by = user_id]
+
+user_features <- Reduce(function(x,y) merge(x,y, by="user_id", all.x=TRUE),
+                        list(u_cnt, u_pref_hour, u_pref_dow, u_win))
+
+for (cn in names(user_features)) {
+  if (is.numeric(user_features[[cn]])) user_features[is.na(get(cn)), (cn) := 0]
+}
+user_features[is.na(u_pref_hour), u_pref_hour := -1L]
+user_features[is.na(u_pref_dow),  u_pref_dow  := -1L]
+
+
+#item-level 特征
+i_cnt <- dt[, .(
+  i_act_total = .N,
+  i_view = sum(behavior_type==1L),
+  i_fav  = sum(behavior_type==2L),
+  i_cart = sum(behavior_type==3L),
+  i_buy  = sum(behavior_type==4L),
+  i_user_nunique = uniqueN(user_id),
+  i_cat = as.integer(item_category[1]),
+  i_first_time = min(time_parsed),
+  i_last_time  = max(time_parsed)
+), by = item_id]
+
+i_cnt[, `:=`(
+  i_buy_rate  = i_buy / (i_view + eps),
+  i_cart_rate = i_cart / (i_view + eps),
+  i_buy_share = i_buy / (i_act_total + eps)
+)]
+
+i_win <- dt[, .(
+  i_act_1d = sum(in_1d),
+  i_act_3d = sum(in_3d),
+  i_act_7d = sum(in_7d),
+  i_buy_1d = sum(in_1d & behavior_type==4L),
+  i_buy_3d = sum(in_3d & behavior_type==4L),
+  i_buy_7d = sum(in_7d & behavior_type==4L)
+), by = item_id]
+
+item_features <- merge(i_cnt, i_win, by="item_id", all.x=TRUE)
+for (cn in names(item_features)) {
+  if (is.numeric(item_features[[cn]])) item_features[is.na(get(cn)), (cn) := 0]
+}
+
+
+#user-item-level 特征
+ui_cnt <- dt[, .(
+  ui_act_total = .N,
+  ui_view = sum(behavior_type==1L),
+  ui_fav  = sum(behavior_type==2L),
+  ui_cart = sum(behavior_type==3L),
+  ui_buy  = sum(behavior_type==4L),
+  ui_day_nunique  = uniqueN(date),
+  ui_hour_nunique = uniqueN(hour),
+  ui_first_time = min(time_parsed),
+  ui_last_time  = max(time_parsed)
+), by = .(user_id, item_id)]
+
+ui_cnt[, `:=`(
+  ui_buy_rate  = ui_buy  / (ui_view + eps),
+  ui_cart_rate = ui_cart / (ui_view + eps),
+  ui_fav_rate  = ui_fav  / (ui_view + eps),
+  ui_recency_hours = as.numeric(difftime(time_max, ui_last_time, units="hours"))
+)]
+
+ui_win <- dt[, .(
+  ui_act_1d = sum(in_1d),
+  ui_act_3d = sum(in_3d),
+  ui_act_7d = sum(in_7d),
+  ui_buy_1d = sum(in_1d & behavior_type==4L),
+  ui_buy_3d = sum(in_3d & behavior_type==4L),
+  ui_buy_7d = sum(in_7d & behavior_type==4L)
+), by = .(user_id, item_id)]
+
+ui_features <- merge(ui_cnt, ui_win, by=c("user_id","item_id"), all.x=TRUE)
+for (cn in names(ui_features)) {
+  if (is.numeric(ui_features[[cn]])) ui_features[is.na(get(cn)), (cn) := 0]
+}
+
+
+
+#合并成最终样本（user_id, item_id 一行一对）
+setkey(user_features, user_id)
+setkey(item_features, item_id)
+setkey(ui_features, user_id, item_id)
+
+feat <- user_features[ui_features, on="user_id"]
+feat <- item_features[feat, on="item_id"]
+
+# 交叉特征
+feat[, `:=`(
+  ui_user_item_pop = u_act_total * i_act_total,
+  ui_user_item_buy_rate_mix = (u_buy_rate + i_buy_rate) / 2
+)]
+
+
+#标签：是否发生过购买
+feat[, label_buy := as.integer(ui_buy > 0)]
+
+fwrite(feat, "output/features_user_item_raw.csv")
+
+
+
+#70/20/10 按用户分层抽样
+set.seed(42)
+
+#用feat来构造用户分层标签
+user_strata <- feat[, .(u_label_buy = as.integer(any(label_buy == 1L))), by = user_id]
+
+#安全join回feat
+setkey(feat, user_id)
+setkey(user_strata, user_id)
+feat[user_strata, u_label_buy := i.u_label_buy]
+feat[is.na(u_label_buy), u_label_buy := 0L]
+
+#用户层面分层抽样
+u_pos <- user_strata[u_label_buy == 1L, user_id]
+u_neg <- user_strata[u_label_buy == 0L, user_id]
+
+split_users_one_stratum <- function(u_vec, p_train = 0.7, p_val = 0.2) {
+  u_vec <- sample(u_vec, length(u_vec), replace = FALSE)
+  n <- length(u_vec)
+  n_train <- floor(n * p_train)
+  n_val   <- floor(n * p_val)
+  list(
+    train = u_vec[1:n_train],
+    val   = u_vec[(n_train + 1):(n_train + n_val)],
+    test  = u_vec[(n_train + n_val + 1):n]
+  )
+}
+
+sp_pos <- split_users_one_stratum(u_pos, 0.7, 0.2)
+sp_neg <- split_users_one_stratum(u_neg, 0.7, 0.2)
+
+u_train <- c(sp_pos$train, sp_neg$train)
+u_val   <- c(sp_pos$val,   sp_neg$val)
+u_test  <- c(sp_pos$test,  sp_neg$test)
+
+# 互斥覆盖检查
+stopifnot(length(intersect(u_train, u_val)) == 0)
+stopifnot(length(intersect(u_train, u_test)) == 0)
+stopifnot(length(intersect(u_val, u_test)) == 0)
+stopifnot(setequal(c(u_train, u_val, u_test), unique(feat$user_id)))
+
+#映射split回每行user-item
+feat[, split := fifelse(user_id %in% u_train, "train",
+                 fifelse(user_id %in% u_val, "val", "test"))]
+
+train_dt <- feat[split == "train"]
+val_dt   <- feat[split == "val"]
+test_dt  <- feat[split == "test"]
+
+#检查：用户层正负比例
+check_ratio <- function(x) {
+  tmp <- unique(x[, .(user_id, u_label_buy)])
+  tmp[, .(users = .N, pos = sum(u_label_buy == 1L), pos_rate = mean(u_label_buy == 1L))]
+}
+
+cat("\n[User-level label distribution]\n")
+cat("ALL :\n");   print(check_ratio(feat))
+cat("TRAIN:\n");  print(check_ratio(train_dt))
+cat("VAL  :\n");  print(check_ratio(val_dt))
+cat("TEST :\n");  print(check_ratio(test_dt))
+
+cat("\n[Rows]\n")
+print(data.table(
+  split = c("ALL","TRAIN","VAL","TEST"),
+  rows  = c(nrow(feat), nrow(train_dt), nrow(val_dt), nrow(test_dt))
+))
+
+#raw总表（含 split）
+fwrite(feat, "output/all_set_raw.csv")
+
+
+#预处理：log1p+z-score（只用train拟合）
+exclude_cols <- c(
+  "user_id","item_id","label_buy","split",
+  "u_pref_hour","u_pref_dow","i_cat",
+  "u_first_time","u_last_time","i_first_time","i_last_time","ui_first_time","ui_last_time"
+)
+
+num_cols <- names(train_dt)[sapply(train_dt, is.numeric)]
+num_cols <- setdiff(num_cols, exclude_cols)
+
+#log1p
+count_like <- grep("(_act_|_view|_fav|_cart|_buy(?!_rate)|_nunique|_pop|_1d|_3d|_7d)", num_cols, value=TRUE, perl=TRUE)
+for (cn in count_like) {
+  train_dt[, (cn) := log1p(get(cn))]
+  val_dt[,   (cn) := log1p(get(cn))]
+  test_dt[,  (cn) := log1p(get(cn))]
+}
+
+# z-score：只用 train 的均值/方差
+mu  <- sapply(num_cols, function(cn) mean(train_dt[[cn]], na.rm=TRUE))
+sdv <- sapply(num_cols, function(cn) sd(train_dt[[cn]], na.rm=TRUE))
+sdv[is.na(sdv) | sdv==0] <- 1
+
+for (cn in num_cols) {
+  train_dt[, (cn) := (get(cn) - mu[[cn]]) / sdv[[cn]]]
+  val_dt[,   (cn) := (get(cn) - mu[[cn]]) / sdv[[cn]]]
+  test_dt[,  (cn) := (get(cn) - mu[[cn]]) / sdv[[cn]]]
+}
+
+
+fwrite(feat, "output/all_set_processed.csv")
+#输出建模用数据集
+fwrite(train_dt, "output/train_set.csv")
+fwrite(val_dt,   "output/val_set.csv")
+fwrite(test_dt,  "output/test_set.csv")
+
+
+#输出特征字典
+meaning <- function(f) {
+  f <- as.character(f)
+  
+  #ID/标签/元数据
+  if (f == "user_id")   return("identifier: user id")
+  if (f == "item_id")   return("identifier: item id")
+  if (f == "label_buy") return("label: whether ui_buy > 0 (historical)")
+  if (f == "split")     return("meta: dataset split flag (train/val/test)")
+
+  #级别
+  lvl <- if (grepl("^u_", f)) "user"
+  else if (grepl("^i_", f)) "item"
+  else if (grepl("^ui_", f)) "user-item"
+  else "meta"
+
+  #同类计数
+  # user级
+  if (grepl("^u_item_nunique$", f)) return("user number of distinct items interacted")
+  if (grepl("^u_cat_nunique$",  f)) return("user number of distinct categories interacted")
+  if (grepl("^u_day_nunique$",  f)) return("user number of active days")
+  if (grepl("^u_hour_nunique$", f)) return("user number of active hours (0–23)")
+
+  # item级
+  if (grepl("^i_user_nunique$", f)) return("item number of distinct users interacted")
+
+  # user-item级
+  if (grepl("^ui_day_nunique$",  f)) return("user-item number of active days")
+  if (grepl("^ui_hour_nunique$", f)) return("user-item number of active hours (0–23)")
+
+  #行为计数
+  if (grepl("act_total$", f)) return(paste(lvl, "total actions"))
+  if (grepl("_view$", f))     return(paste(lvl, "view count"))
+  if (grepl("_fav$", f))      return(paste(lvl, "favorite count"))
+  if (grepl("_cart$", f))     return(paste(lvl, "add-to-cart count"))
+  if (grepl("_buy$", f) && !grepl("buy_rate|buy_share", f)) return(paste(lvl, "purchase count"))
+
+
+    #比例
+  if (grepl("buy_rate$", f))  return(paste(lvl, "buy-to-view ratio"))
+  if (grepl("cart_rate$", f)) return(paste(lvl, "cart-to-view ratio"))
+  if (grepl("fav_rate$", f))  return(paste(lvl, "fav-to-view ratio"))
+  if (grepl("buy_share$", f)) return(paste(lvl, "purchase share of actions"))
+
+  #相关时间
+  if (grepl("first_time$", f))    return(paste(lvl, "first interaction time"))
+  if (grepl("last_time$", f))     return(paste(lvl, "last interaction time"))
+  if (grepl("recency_hours$", f)) return(paste(lvl, "hours since last interaction"))
+
+
+  #用户偏好
+  if (grepl("pref_hour$", f)) return("user most active hour (0–23)")
+  if (grepl("pref_dow$", f))  return("user most active day-of-week (1=Mon..7=Sun)")
+
+  #物品类别
+  if (f == "i_cat") return("item category id")
+
+  #时间窗口
+  if (grepl("_1d$", f)) return(paste(lvl, "count in last 1 day"))
+  if (grepl("_3d$", f)) return(paste(lvl, "count in last 3 days"))
+  if (grepl("_7d$", f)) return(paste(lvl, "count in last 7 days"))
+
+  #交叉特征
+  if (grepl("user_item_pop$", f)) return("cross: user activity * item popularity")
+  if (grepl("buy_rate_mix$", f))  return("cross: average of user buy_rate and item buy_rate")
+
+  return(paste(lvl, "feature"))
+}
+
+base_dt <-feat
+
+feat_dict <- data.table(
+  feature = names(base_dt),
+  type    = sapply(base_dt, function(x) class(x)[1]),
+  role    = fifelse(names(base_dt) %in% c("user_id","item_id"), "id",
+            fifelse(names(base_dt) %in% c("label_buy"), "label",
+            fifelse(names(base_dt) %in% c("split"), "meta", "feature"))),
+  level   = fifelse(grepl("^u_", names(base_dt)), "user",
+            fifelse(grepl("^i_", names(base_dt)), "item",
+            fifelse(grepl("^ui_", names(base_dt)), "user_item", "meta"))),
+  meaning = vapply(names(base_dt), meaning, character(1))
+)
+
+fwrite(feat_dict, "output/feature_dictionary.csv", bom = TRUE)
+
+```
+

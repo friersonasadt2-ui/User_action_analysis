@@ -1,0 +1,63 @@
+---
+title: "data_clean"
+author: "Loih"
+date: "2026-01-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("R/R_setup.R")
+```
+
+
+```{r}
+#读数据
+ua <- fread("data/user_action.csv", header = TRUE, sep = "auto",
+            na.strings = c("", "NA", "NaN", "NULL"))
+setnames(ua, tolower(names(ua)))
+
+need_cols <- c("user_id", "item_id", "behavior_type", "item_category", "time")
+miss_cols <- setdiff(need_cols, names(ua))
+if (length(miss_cols) > 0) stop(paste("Missing:", paste(miss_cols, collapse = ", ")))
+
+#标准化数据类型
+ua[, `:=`(
+  user_id       = str_trim(as.character(user_id)),
+  item_id       = str_trim(as.character(item_id)),
+  behavior_type = suppressWarnings(as.integer(behavior_type)),
+  item_category = suppressWarnings(as.integer(item_category)),
+  time_raw      = str_trim(gsub("/", "-", as.character(time)))
+)]
+
+#时间处理
+ua[, time_parsed := parse_time_utc(time_raw)]
+
+n_before <- nrow(ua)
+
+#清洗
+ua_clean <- ua[
+  !(is.na(user_id) | user_id == "" |
+      is.na(item_id) | item_id == "" |
+      is.na(behavior_type) |
+      is.na(item_category) |
+      is.na(time_parsed))
+]
+
+n_after <- nrow(ua_clean)
+cat("Rows (raw):", n_before, "\n")
+cat("Rows after missing-clean:", n_after, "\n")
+cat("Removed due to missing/bad records:", n_before - n_after, "\n\n")
+
+
+#输出cleaned数据
+user_action_cleaned <- ua_clean[, .(
+  user_id, item_id, behavior_type, item_category,
+  time = time_raw
+)]
+
+fwrite(user_action_cleaned, "output/user_action_clean.csv")
+saveRDS(user_action_cleaned, "output/user_action_clean.rds")
+
+
+```

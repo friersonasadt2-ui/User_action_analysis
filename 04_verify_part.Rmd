@@ -1,0 +1,156 @@
+---
+title: "04_verify_part"
+author: "Loih"
+date: "2026-01-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("R/R_setup.R")
+```
+
+```{r}
+train_dt <- fread("output/train_set.csv")
+val_dt   <- fread("output/val_set.csv")
+test_dt  <- fread("output/test_set.csv")
+all_dt   <- fread("output/all_set_processed.csv")
+
+label_col <- "label_buy"
+
+#定义排除列
+leak_cols <- c("ui_buy","ui_buy_rate","ui_buy_1d","ui_buy_3d","ui_buy_7d")
+
+exclude_cols <- c(
+  "user_id","item_id","split", label_col,
+  "u_pref_hour","u_pref_dow","i_cat",
+  "u_first_time","u_last_time","i_first_time","i_last_time",
+  "ui_first_time","ui_last_time","u_label_buy",
+  leak_cols
+)
+
+#只对numeric且不在exclude里的列做筛选
+feat_cols <- setdiff(names(train_dt)[sapply(train_dt, is.numeric)], exclude_cols)
+
+# 去掉零方差和常数特征
+nzv <- feat_cols[sapply(feat_cols, function(cn) {
+  x <- train_dt[[cn]]
+  x <- x[is.finite(x)]
+  length(x) == 0 || var(x, na.rm = TRUE) == 0
+})]
+feat_cols1 <- setdiff(feat_cols, nzv)
+
+cat("Numeric feature candidates:", length(feat_cols), "\n")
+cat("Remove zero-variance:", length(nzv), "\n")
+
+#相关性过滤
+corr_threshold <- 0.95
+
+X <- as.matrix(train_dt[, ..feat_cols1])
+C <- suppressWarnings(cor(X, use = "pairwise.complete.obs"))
+
+idx <- which(abs(C) >= corr_threshold & upper.tri(C), arr.ind = TRUE)
+corr_pairs <- data.table(
+  f1 = rownames(C)[idx[,1]],
+  f2 = colnames(C)[idx[,2]],
+  corr = C[idx]
+)
+corr_pairs[, abs_corr := abs(corr)]
+setorder(corr_pairs, -abs_corr)
+corr_pairs[, abs_corr := NULL]
+fwrite(corr_pairs, "output/feature_corr_pairs.csv")
+
+# “与标签相关性更强”的保留规则
+y <- train_dt[[label_col]]
+score_with_label <- function(cn) {
+  x <- train_dt[[cn]]
+  if (all(!is.finite(x))) return(0)
+  suppressWarnings(abs(cor(x, y, use = "pairwise.complete.obs")))
+}
+
+to_drop_corr <- character(0)
+
+if (nrow(corr_pairs) > 0) {
+  for (i in seq_len(nrow(corr_pairs))) {
+    a <- corr_pairs$f1[i]
+    b <- corr_pairs$f2[i]
+    if (a %in% to_drop_corr || b %in% to_drop_corr) next
+
+    sa <- score_with_label(a); if (is.na(sa)) sa <- 0
+    sb <- score_with_label(b); if (is.na(sb)) sb <- 0
+
+    if (sa > sb) {
+      to_drop_corr <- c(to_drop_corr, b)
+    } else if (sb > sa) {
+      to_drop_corr <- c(to_drop_corr, a)
+    } else {
+      va <- var(train_dt[[a]], na.rm = TRUE); if (is.na(va)) va <- 0
+      vb <- var(train_dt[[b]], na.rm = TRUE); if (is.na(vb)) vb <- 0
+      to_drop_corr <- c(to_drop_corr, ifelse(va >= vb, b, a))
+    }
+  }
+}
+
+to_drop_corr <- unique(to_drop_corr)
+
+keep_cols <- setdiff(feat_cols, c(nzv, to_drop_corr))
+
+fwrite(data.table(feature = nzv),          "output/feature_drop_zero_var.csv")
+fwrite(data.table(feature = to_drop_corr), "output/feature_drop_by_corr.csv")
+fwrite(data.table(feature = keep_cols),    "output/feature_keep_final.csv")
+
+cat("Features before:", length(feat_cols), "\n")
+cat("Drop zero-var:", length(nzv), "\n")
+cat("Drop by corr :", length(to_drop_corr), "\n")
+cat("Keep final   :", length(keep_cols), "\n")
+
+#输出filtered数据集
+keep_all_cols <- c("user_id","item_id","split", label_col, keep_cols)
+
+#只保留各表里实际存在的列
+cols_train <- intersect(keep_all_cols, names(train_dt))
+cols_val   <- intersect(keep_all_cols, names(val_dt))
+cols_test  <- intersect(keep_all_cols, names(test_dt))
+cols_all   <- intersect(keep_all_cols, names(all_dt))
+
+train_keep <- train_dt[, ..cols_train]
+val_keep   <- val_dt[,   ..cols_val]
+test_keep  <- test_dt[,  ..cols_test]
+all_keep   <- all_dt[,   ..cols_all]
+
+fwrite(train_keep, "output/train_set_filtered.csv")
+fwrite(val_keep,   "output/val_set_filtered.csv")
+fwrite(test_keep,  "output/test_set_filtered.csv")
+fwrite(all_keep,   "output/all_set_filtered.csv")
+
+#过滤特征字典+按 dict_keep_features固定顺序排序
+feat_dict <- fread("output/feature_dictionary.csv", encoding = "UTF-8")
+
+# 确保feature列存在且为字符
+stopifnot("feature" %in% names(feat_dict))
+feat_dict[, feature := as.character(feature)]
+
+#字典里保留：id/label/meta + keep_cols
+dict_keep_features <- c("user_id","item_id","split", label_col, keep_cols)
+dict_keep_features <- unique(dict_keep_features)
+
+#先过滤
+feat_dict_filtered <- feat_dict[feature %in% dict_keep_features]
+
+#用“顺序列”排序
+order_map <- data.table(feature = dict_keep_features, order_id = seq_along(dict_keep_features))
+feat_dict_filtered <- merge(feat_dict_filtered, order_map, by = "feature", all.x = TRUE)
+
+#给大值排最后
+feat_dict_filtered[is.na(order_id), order_id := 999999L]
+
+setorder(feat_dict_filtered, order_id)
+feat_dict_filtered[, order_id := NULL]
+
+fwrite(feat_dict_filtered, "output/feature_dictionary_filtered.csv", bom = TRUE)
+
+
+```
+
+
+`

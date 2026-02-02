@@ -1,0 +1,156 @@
+---
+title: "Basic_data_analysis"
+author: "Loih"
+date: "2026-01-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("R/R_setup.R")
+```
+
+
+```{r}
+#读取cleaned数据
+dt <- fread("output/user_action_clean.csv", na.strings = c("", "NA", "NaN", "NULL"))
+setnames(dt, tolower(names(dt)))
+
+need_cols <- c("user_id","item_id","behavior_type","item_category","time")
+miss_cols <- setdiff(need_cols, names(dt))
+if (length(miss_cols) > 0) stop(paste("Missing:", paste(miss_cols, collapse = ", ")))
+
+dt[, `:=`(
+  user_id       = str_trim(as.character(user_id)),
+  item_id       = str_trim(as.character(item_id)),
+  behavior_type = as.integer(behavior_type),
+  item_category = as.integer(item_category),
+  time_raw      = str_trim(gsub("/", "-", as.character(time)))
+)]
+dt[, time_parsed := parse_time_utc(time_raw)]
+
+dt <- dt[!(is.na(user_id) | user_id=="" |
+           is.na(item_id) | item_id=="" |
+           is.na(behavior_type) |
+           is.na(item_category) |
+           is.na(time_parsed))]
+
+dt[, `:=`(
+  date = as.Date(time_parsed),
+  hour = as.integer(format(time_parsed, "%H"))
+)]
+
+time_min <- dt[, min(time_parsed)]
+time_max <- dt[, max(time_parsed)]
+
+basic_clean <- data.table(
+  metric = c("Rows", "Users", "Items", "Categories", "Time Start", "Time End"),
+  value  = c(
+    nrow(dt),
+    uniqueN(dt$user_id),
+    uniqueN(dt$item_id),
+    uniqueN(dt$item_category),
+    format(time_min, "%Y-%m-%d %H:%M:%S"),
+    format(time_max, "%Y-%m-%d %H:%M:%S")
+  )
+)
+
+cat("数据概要\n")
+print(basic_clean)
+
+
+```
+
+```{r}
+#用户行为分布
+behavior_df <- dt[, .N, by = behavior_type][order(behavior_type)]
+behavior_df[, behavior_type := factor(behavior_type, levels = sort(unique(behavior_type)))]
+
+p1 <- ggplot(behavior_df, aes(x = behavior_type, y = N, fill = behavior_type)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = scales::comma(N)), vjust = -0.3, size = 3) +
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.1))) +
+  labs(title = "Behavior Type Distribution",
+       x = "behavior_type", y = "Records") +
+  theme_minimal()
+print(p1)
+
+#日分布
+daily_df <- dt[, .N, by = date][order(date)]
+p2 <- ggplot(daily_df, aes(x = date, y = N)) +
+  geom_line() +
+  geom_point(size = 1) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Daily Activity Trend",
+       x = "Date", y = "Records") +
+  theme_minimal()
+print(p2)
+
+#小时分布
+hourly_df <- dt[, .N, by = hour]
+all_hours <- data.table(hour = 0:23)
+hourly_df <- all_hours[hourly_df, on = "hour"]
+hourly_df[is.na(N), N := 0L]
+
+p3 <- ggplot(hourly_df, aes(x = hour, y = N, fill = N)) +
+  geom_col() +
+  scale_x_continuous(breaks = 0:23) +
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.1))) +
+  labs(title = "Hourly Distribution",
+       x = "Hour", y = "Records") +
+  theme_minimal()
+print(p3)
+
+#前30热门商品交互分布图
+item_pop <- dt[, .N, by = item_id][order(-N)]
+top30 <- head(item_pop, 30)
+top30[, item_id := factor(item_id, levels = rev(item_id))]
+
+p_top_items <- ggplot(top30, aes(x = item_id, y = N, fill = N)) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Top 30 Items by Interaction Count (Cleaned)",
+       x = "item_id", y = "Interactions") +
+  theme_minimal()
+
+print(p_top_items)
+beh_map <- c(`1`="view", `2`="fav", `3`="cart", `4`="buy")
+
+beh_df <- dt[, .N, by = behavior_type][order(behavior_type)]
+beh_df[, behavior_name := beh_map[as.character(behavior_type)]]
+beh_df[is.na(behavior_name), behavior_name := "other"]
+beh_df[, behavior_name := factor(behavior_name, levels = c("view","fav","cart","buy","other"))]
+
+
+#ui_buy 是历史购买次数，不是未来标签，但能说明“越近期越可能买”的规律性
+rec <- ui_features[, .(ui_recency_hours, ui_buy)]
+
+#过滤
+rec <- rec[is.finite(ui_recency_hours)]
+rec[, rec_bin := cut(ui_recency_hours,
+                     breaks = c(-Inf, 6, 24, 72, 168, 336, Inf),
+                     labels = c("<=6h","6-24h","1-3d","3-7d","7-14d",">14d"),
+                     right = TRUE)]
+bin_df <- rec[, .(
+  n_pairs = .N,
+  buy_rate_pairs = mean(ui_buy > 0)  # 发生过购买的(user,item)比例
+), by = rec_bin][order(rec_bin)]
+
+p4 <- ggplot(bin_df, aes(x = rec_bin, y = buy_rate_pairs, fill = buy_rate_pairs)) +
+  geom_col() +
+  geom_text(aes(label = percent(buy_rate_pairs, accuracy = 0.1)),
+            vjust = -0.3, size = 3) +
+  scale_y_continuous(labels = percent, expand = expansion(mult=c(0, 0.12))) +
+  labs(title = "Recency vs Purchase",
+       x = "Recency Bin (hours since last interaction)",
+       y = "Share of (user,item) with any buy") +
+  theme_minimal()
+
+print(p4)
+
+
+```
+
+
+
