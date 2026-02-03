@@ -12,7 +12,7 @@ source("R/R_setup.R")
 
 
 ```{r}
-dt <- fread("output/user_action_clean.csv", na.strings = c("", "NA", "NaN", "NULL"))
+dt <- fread(file.path(dir_data, "user_action_clean.csv"), na.strings = c("", "NA", "NaN", "NULL"))
 setnames(dt, tolower(names(dt)))
 
 need_cols <- c("user_id","item_id","behavior_type","item_category","time")
@@ -188,9 +188,6 @@ feat[, `:=`(
 #标签：是否发生过购买
 feat[, label_buy := as.integer(ui_buy > 0)]
 
-fwrite(feat, "output/features_user_item_raw.csv")
-
-
 
 #70/20/10 按用户分层抽样
 set.seed(42)
@@ -260,7 +257,7 @@ print(data.table(
 ))
 
 #raw总表（含 split）
-fwrite(feat, "output/all_set_raw.csv")
+fwrite(feat, file.path(dir_feat,"all_set_raw.csv"))
 
 
 #预处理：log1p+z-score（只用train拟合）
@@ -293,11 +290,11 @@ for (cn in num_cols) {
 }
 
 
-fwrite(feat, "output/all_set_processed.csv")
+fwrite(feat, file.path(dir_feat,"all_set_processed.csv"))
 #输出建模用数据集
-fwrite(train_dt, "output/train_set.csv")
-fwrite(val_dt,   "output/val_set.csv")
-fwrite(test_dt,  "output/test_set.csv")
+fwrite(train_dt, file.path(dir_model,"train_set.csv"))
+fwrite(val_dt,   file.path(dir_model,"val_set.csv"))
+fwrite(test_dt,  file.path(dir_model,"test_set.csv"))
 
 
 #输出特征字典
@@ -383,7 +380,7 @@ feat_dict <- data.table(
   meaning = vapply(names(base_dt), meaning, character(1))
 )
 
-fwrite(feat_dict, "output/feature_dictionary.csv", bom = TRUE)
+fwrite(feat_dict, file.path(dir_dict,"feature_dictionary.csv"), bom = TRUE)
 
 ```
 

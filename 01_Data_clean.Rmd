@@ -56,8 +56,8 @@ user_action_cleaned <- ua_clean[, .(
   time = time_raw
 )]
 
-fwrite(user_action_cleaned, "output/user_action_clean.csv")
-saveRDS(user_action_cleaned, "output/user_action_clean.rds")
+fwrite(user_action_cleaned, file.path(dir_data, "user_action_clean.csv"))
+saveRDS(user_action_cleaned, file.path(dir_data, "user_action_clean.rds"))
 
 
 ```

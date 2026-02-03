@@ -13,7 +13,7 @@ source("R/R_setup.R")
 
 ```{r}
 #读取cleaned数据
-dt <- fread("output/user_action_clean.csv", na.strings = c("", "NA", "NaN", "NULL"))
+dt <- fread(file.path(dir_data, "user_action_clean.csv"), na.strings = c("", "NA", "NaN", "NULL"))
 setnames(dt, tolower(names(dt)))
 
 need_cols <- c("user_id","item_id","behavior_type","item_category","time")
@@ -123,18 +123,30 @@ beh_df[is.na(behavior_name), behavior_name := "other"]
 beh_df[, behavior_name := factor(behavior_name, levels = c("view","fav","cart","buy","other"))]
 
 
-#ui_buy 是历史购买次数，不是未来标签，但能说明“越近期越可能买”的规律性
-rec <- ui_features[, .(ui_recency_hours, ui_buy)]
+#ui_buy是历史购买次数，不是未来标签，但能说明“越近期越可能买”的规律性
+ui_tmp <- dt[, .(
+  ui_last_time = max(time_parsed),
+  ui_buy = sum(behavior_type == 4L)
+), by = .(user_id, item_id)]
 
-#过滤
+#计算recency：距离全局time_max的小时数
+time_max <- dt[, max(time_parsed)]
+ui_tmp[, ui_recency_hours := as.numeric(difftime(time_max, ui_last_time, units = "hours"))]
+
+#分桶并计算：每个桶里“发生过购买”的(user,item)比例
+rec <- ui_tmp[, .(ui_recency_hours, ui_buy)]
 rec <- rec[is.finite(ui_recency_hours)]
-rec[, rec_bin := cut(ui_recency_hours,
-                     breaks = c(-Inf, 6, 24, 72, 168, 336, Inf),
-                     labels = c("<=6h","6-24h","1-3d","3-7d","7-14d",">14d"),
-                     right = TRUE)]
+
+rec[, rec_bin := cut(
+  ui_recency_hours,
+  breaks = c(-Inf, 6, 24, 72, 168, 336, Inf),
+  labels = c("<=6h","6-24h","1-3d","3-7d","7-14d",">14d"),
+  right = TRUE
+)]
+
 bin_df <- rec[, .(
   n_pairs = .N,
-  buy_rate_pairs = mean(ui_buy > 0)  # 发生过购买的(user,item)比例
+  buy_rate_pairs = mean(ui_buy > 0)
 ), by = rec_bin][order(rec_bin)]
 
 p4 <- ggplot(bin_df, aes(x = rec_bin, y = buy_rate_pairs, fill = buy_rate_pairs)) +
@@ -142,9 +154,11 @@ p4 <- ggplot(bin_df, aes(x = rec_bin, y = buy_rate_pairs, fill = buy_rate_pairs)
   geom_text(aes(label = percent(buy_rate_pairs, accuracy = 0.1)),
             vjust = -0.3, size = 3) +
   scale_y_continuous(labels = percent, expand = expansion(mult=c(0, 0.12))) +
-  labs(title = "Recency vs Purchase",
-       x = "Recency Bin (hours since last interaction)",
-       y = "Share of (user,item) with any buy") +
+  labs(
+    title = "Recency vs Purchase (historical signal)",
+    x = "Recency Bin (hours since last interaction)",
+    y = "Share of (user,item) with any buy"
+  ) +
   theme_minimal()
 
 print(p4)

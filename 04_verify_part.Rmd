@@ -11,10 +11,11 @@ source("R/R_setup.R")
 ```
 
 ```{r}
-train_dt <- fread("output/train_set.csv")
-val_dt   <- fread("output/val_set.csv")
-test_dt  <- fread("output/test_set.csv")
-all_dt   <- fread("output/all_set_processed.csv")
+options(datatable.fread.mmap = FALSE)
+train_dt <- fread(file.path(dir_model, "train_set.csv"))
+val_dt   <- fread(file.path(dir_model, "val_set.csv"))
+test_dt  <- fread(file.path(dir_model, "test_set.csv"))
+all_dt   <- fread(file.path(dir_feat, "all_set_processed.csv"))
 
 label_col <- "label_buy"
 
@@ -32,7 +33,7 @@ exclude_cols <- c(
 #只对numeric且不在exclude里的列做筛选
 feat_cols <- setdiff(names(train_dt)[sapply(train_dt, is.numeric)], exclude_cols)
 
-# 去掉零方差和常数特征
+#去掉零方差和常数特征
 nzv <- feat_cols[sapply(feat_cols, function(cn) {
   x <- train_dt[[cn]]
   x <- x[is.finite(x)]
@@ -58,7 +59,6 @@ corr_pairs <- data.table(
 corr_pairs[, abs_corr := abs(corr)]
 setorder(corr_pairs, -abs_corr)
 corr_pairs[, abs_corr := NULL]
-fwrite(corr_pairs, "output/feature_corr_pairs.csv")
 
 # “与标签相关性更强”的保留规则
 y <- train_dt[[label_col]]
@@ -95,9 +95,7 @@ to_drop_corr <- unique(to_drop_corr)
 
 keep_cols <- setdiff(feat_cols, c(nzv, to_drop_corr))
 
-fwrite(data.table(feature = nzv),          "output/feature_drop_zero_var.csv")
-fwrite(data.table(feature = to_drop_corr), "output/feature_drop_by_corr.csv")
-fwrite(data.table(feature = keep_cols),    "output/feature_keep_final.csv")
+fwrite(data.table(feature = keep_cols), file.path(dir_feat, "feature_keep_final.csv"))
 
 cat("Features before:", length(feat_cols), "\n")
 cat("Drop zero-var:", length(nzv), "\n")
@@ -118,13 +116,13 @@ val_keep   <- val_dt[,   ..cols_val]
 test_keep  <- test_dt[,  ..cols_test]
 all_keep   <- all_dt[,   ..cols_all]
 
-fwrite(train_keep, "output/train_set_filtered.csv")
-fwrite(val_keep,   "output/val_set_filtered.csv")
-fwrite(test_keep,  "output/test_set_filtered.csv")
-fwrite(all_keep,   "output/all_set_filtered.csv")
+fwrite(train_keep, file.path(dir_model,"train_set_filtered.csv"))
+fwrite(val_keep, file.path(dir_model,"val_set_filtered.csv"))
+fwrite(test_keep, file.path(dir_model,"test_set_filtered.csv"))
+fwrite(all_keep, file.path(dir_feat,"all_set_filtered.csv"))
 
 #过滤特征字典+按 dict_keep_features固定顺序排序
-feat_dict <- fread("output/feature_dictionary.csv", encoding = "UTF-8")
+feat_dict <- fread(file.path(dir_dict,"feature_dictionary.csv"), encoding = "UTF-8")
 
 # 确保feature列存在且为字符
 stopifnot("feature" %in% names(feat_dict))
@@ -147,10 +145,18 @@ feat_dict_filtered[is.na(order_id), order_id := 999999L]
 setorder(feat_dict_filtered, order_id)
 feat_dict_filtered[, order_id := NULL]
 
-fwrite(feat_dict_filtered, "output/feature_dictionary_filtered.csv", bom = TRUE)
+fwrite(feat_dict_filtered, file.path(dir_dict,"feature_dictionary_filtered.csv"), bom = TRUE)
 
 
 ```
 
 
-`
+```{r}
+
+```
+
+
+
+
+
+
