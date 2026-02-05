@@ -4,7 +4,11 @@ author: "Loih"
 date: "2026-01-29"
 output: html_document
 ---
-
+#功能：
+#对特征与模型效果进行验证评估，输出性能指标与稳定性结论
+#数据集划分与验证策略（留出法/交叉验证/时间切分）
+#特征筛选（低方差、高缺失、高相关冗余、单变量区分度如 AUC/IV 等）
+#输出验证结论与特征删减
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 source("R/R_setup.R")

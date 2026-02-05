@@ -4,7 +4,15 @@ author: "Loih"
 date: "2026-01-27"
 output: html_document
 ---
-
+#功能：
+#围绕建模目标构建多层次特征，并完成特征筛选与编码预处理，形成训练特征矩阵
+#特征构建：
+#Item 层：商品热度、收藏/加购/购买率、时间窗统计
+#User 层：用户活跃度、行为偏好、最近行为强度
+#User-Item 层：交互次数、转化率、最近交互间隔（recency）
+#时间窗口特征（1d/3d/7d）与比率型特征构造
+#类别特征编码（One-Hot/Label Encoding）与数值标准化
+#生成特征字典（特征名、定义、计算逻辑）
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 source("R/R_setup.R")

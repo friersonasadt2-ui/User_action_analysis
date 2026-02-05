@@ -1,3 +1,9 @@
+#功能：
+#负责项目运行环境初始化与全局配置，保证后续各模块可复现执行
+#加载并检查所需 R 包
+#设置全局参数
+#定义通用工具函数
+#统一输入输出目录规范，确保脚本之间可衔接
 suppressPackageStartupMessages({
   library(data.table)
   library(lubridate)
