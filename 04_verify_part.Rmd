@@ -24,7 +24,7 @@ all_dt <- fread(file.path(dir_feat, "all_set_processed.csv"))
 label_col <- "label_buy"
 
 #定义排除列
-leak_cols <- c("ui_buy","ui_buy_rate","ui_buy_1d","ui_buy_3d","ui_buy_7d")
+leak_cols <- c("ui_buy","ui_buy_rate","ui_buy_1d","ui_buy_2d", "ui_buy_3d","ui_buy_4d","ui_buy_5d","ui_buy_6d","ui_buy_7d")
 
 exclude_cols <- c(
   "user_id","item_id","split", label_col,
@@ -99,7 +99,6 @@ to_drop_corr <- unique(to_drop_corr)
 
 keep_cols <- setdiff(feat_cols, c(nzv, to_drop_corr))
 
-fwrite(data.table(feature = keep_cols), file.path(dir_feat, "feature_keep_final.csv"))
 
 cat("Features before:", length(feat_cols), "\n")
 cat("Drop zero-var:", length(nzv), "\n")
@@ -304,34 +303,6 @@ uni_tbl <- rbindlist(lapply(feat_cols, function(cn) {
 fwrite(uni_tbl[order(-auc)], file.path(dir_uni, "univariate_auc_iv.csv"))
 
 
-#单变量可视化(Top N)
-dir_plot_uni <- file.path(dir_uni, "plots_univariate")
-dir.create(dir_plot_uni, showWarnings = FALSE, recursive = TRUE)
-topN <- 15
-top_feats <- uni_tbl[order(-auc)][1:min(topN, .N), feature]
-
-plot_one_feature <- function(cn) {
-  tmp <- train_dt[, .(x = get(cn), y = factor(get(label_col)))]
-  tmp <- tmp[is.finite(x)]
-
-  p_hist <- ggplot(tmp, aes(x = x, fill = y)) +
-    geom_histogram(bins = 40, alpha = 0.55, position = "identity") +
-    labs(title = paste0("Histogram: ", cn), x = cn, fill = "label") +
-    theme_minimal()
-
-  p_box <- ggplot(tmp, aes(x = y, y = x, fill = y)) +
-    geom_boxplot(outlier.alpha = 0.2) +
-    labs(title = paste0("Boxplot: ", cn), x = "label", y = cn) +
-    theme_minimal()
-
-  ggsave(filename = file.path(dir_plot_uni, paste0("hist_", cn, ".png")),
-         plot = p_hist, width = 7, height = 4)
-  ggsave(filename = file.path(dir_plot_uni, paste0("box_", cn, ".png")),
-         plot = p_box, width = 6, height = 4)
-}
-invisible(lapply(top_feats, plot_one_feature))
-
-
 #特征重要性：Logistic 回归
 topK <- min(35, length(feat_cols))
 feat_for_logit <- uni_tbl[order(-auc)][1:topK, feature]
@@ -382,11 +353,18 @@ fwrite(perm_imp, file.path(dir_multi, "importance_perm.csv"))
 
 ```{r}
 drop_feats <- c(
-  "u_hour_nunique",
+  #单变量几乎无信息(AUC≈0.50 且 IV≈0)
+  "i_fav_1d","i_fav_2d","i_fav_3d","i_fav_4d","i_fav_5d","i_fav_6d","i_fav_7d",
+  "ui_fav_1d","ui_fav_2d","ui_fav_3d","ui_fav_4d","ui_fav_5d","ui_fav_6d","ui_fav_7d",
   "ui_fav_rate",
-  "u_day_nunique",
-  "i_buy_1d",
-  "u_buy_7d"
+
+  #贡献很弱且冗余高(短窗口到长窗口高度共线)
+  "i_cart_1d","i_cart_2d","i_cart_3d","i_cart_4d",
+  "ui_cart_1d","ui_cart_2d","ui_cart_3d","ui_cart_4d","ui_cart_5d","ui_cart_6d",
+
+  #在logit+perm里边际贡献接近0/为负，且有更强替代
+  "i_cart_6d","i_cart_7d","i_buy_4d","i_buy_5d","i_buy_6d","i_buy_7d",
+  "u_buy_7d","i_view_4d","ui_view_5d","ui_view_6d"
 )
 
 #读入数据
@@ -394,7 +372,7 @@ train_dt2 <- fread(file.path(dir_model,"train_set_filtered.csv"))
 val_dt2 <- fread(file.path(dir_model,"val_set_filtered.csv"))
 test_dt2 <- fread(file.path(dir_model,"test_set_filtered.csv"))
 all_dt2 <- fread(file.path(dir_feat,"all_set_filtered.csv"))
-feat_dict2 <- fread(file.path(dir_dict,"feature_dictionary_filtered.csv"), encoding = "UTF-8")
+feat_dict2 <- data.table::fread(file.path(dir_dict,"feature_dictionary_filtered.csv"), encoding = "UTF-8")
 
 drop_cols <- function(dt, cols_to_drop) {
   cols_exist <- intersect(names(dt), cols_to_drop)
@@ -420,9 +398,10 @@ fwrite(test_dt_final, file.path(dir_model, "test_set_final.csv"))
 fwrite(all_dt_final, file.path(dir_feat, "all_set_final.csv"))
 fwrite(feat_dict_final, file.path(dir_dict, "feature_dictionary_final.csv"), bom = TRUE)
 
-
-
 ```
+
+
+
 
 
 

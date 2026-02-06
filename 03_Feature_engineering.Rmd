@@ -56,7 +56,11 @@ eps <- 1e-9
 dt[, days_to_end := as.numeric(difftime(time_max, time_parsed, units = "days"))]
 dt[, `:=`(
   in_1d = days_to_end <= 1,
+  in_2d = days_to_end <= 2,
   in_3d = days_to_end <= 3,
+  in_4d = days_to_end <= 4,
+  in_5d = days_to_end <= 5,
+  in_6d = days_to_end <= 6,
   in_7d = days_to_end <= 7
 )]
 
@@ -90,11 +94,33 @@ u_pref_dow <- dt[, .N, by = .(user_id, dow)][order(user_id, -N)]
 u_pref_dow <- u_pref_dow[, .SD[1], by = user_id][, .(user_id, u_pref_dow = dow)]
 
 u_win <- dt[, .(
-  u_act_1d = sum(in_1d),
-  u_act_3d = sum(in_3d),
-  u_act_7d = sum(in_7d),
+  u_view_1d = sum(in_1d & behavior_type==1L),
+  u_view_2d = sum(in_2d & behavior_type==1L),
+  u_view_3d = sum(in_3d & behavior_type==1L),
+  u_view_4d = sum(in_4d & behavior_type==1L),
+  u_view_5d = sum(in_5d & behavior_type==1L),
+  u_view_6d = sum(in_6d & behavior_type==1L),
+  u_view_7d = sum(in_7d & behavior_type==1L),
+  u_fav_1d = sum(in_1d & behavior_type==2L),
+  u_fav_2d = sum(in_2d & behavior_type==2L),
+  u_fav_3d = sum(in_3d & behavior_type==2L),
+  u_fav_4d = sum(in_4d & behavior_type==2L),
+  u_fav_5d = sum(in_5d & behavior_type==2L),
+  u_fav_6d = sum(in_6d & behavior_type==2L),
+  u_fav_7d = sum(in_7d & behavior_type==2L),
+  u_cart_1d = sum(in_1d & behavior_type==3L),
+  u_cart_2d = sum(in_2d & behavior_type==3L),
+  u_cart_3d = sum(in_3d & behavior_type==3L),
+  u_cart_4d = sum(in_4d & behavior_type==3L),
+  u_cart_5d = sum(in_5d & behavior_type==3L),
+  u_cart_6d = sum(in_6d & behavior_type==3L),
+  u_cart_7d = sum(in_7d & behavior_type==3L),
   u_buy_1d = sum(in_1d & behavior_type==4L),
+  u_buy_2d = sum(in_2d & behavior_type==4L),
   u_buy_3d = sum(in_3d & behavior_type==4L),
+  u_buy_4d = sum(in_4d & behavior_type==4L),
+  u_buy_5d = sum(in_5d & behavior_type==4L),
+  u_buy_6d = sum(in_6d & behavior_type==4L),
   u_buy_7d = sum(in_7d & behavior_type==4L)
 ), by = user_id]
 
@@ -128,11 +154,33 @@ i_cnt[, `:=`(
 )]
 
 i_win <- dt[, .(
-  i_act_1d = sum(in_1d),
-  i_act_3d = sum(in_3d),
-  i_act_7d = sum(in_7d),
+  i_view_1d = sum(in_1d & behavior_type==1L),
+  i_view_2d = sum(in_2d & behavior_type==1L),
+  i_view_3d = sum(in_3d & behavior_type==1L),
+  i_view_4d = sum(in_4d & behavior_type==1L),
+  i_view_5d = sum(in_5d & behavior_type==1L),
+  i_view_6d = sum(in_6d & behavior_type==1L),
+  i_view_7d = sum(in_7d & behavior_type==1L),
+  i_fav_1d = sum(in_1d & behavior_type==2L),
+  i_fav_2d = sum(in_2d & behavior_type==2L),
+  i_fav_3d = sum(in_3d & behavior_type==2L),
+  i_fav_4d = sum(in_4d & behavior_type==2L),
+  i_fav_5d = sum(in_5d & behavior_type==2L),
+  i_fav_6d = sum(in_6d & behavior_type==2L),
+  i_fav_7d = sum(in_7d & behavior_type==2L),
+  i_cart_1d = sum(in_1d & behavior_type==3L),
+  i_cart_2d = sum(in_2d & behavior_type==3L),
+  i_cart_3d = sum(in_3d & behavior_type==3L),
+  i_cart_4d = sum(in_4d & behavior_type==3L),
+  i_cart_5d = sum(in_5d & behavior_type==3L),
+  i_cart_6d = sum(in_6d & behavior_type==3L),
+  i_cart_7d = sum(in_7d & behavior_type==3L),
   i_buy_1d = sum(in_1d & behavior_type==4L),
+  i_buy_2d = sum(in_2d & behavior_type==4L),
   i_buy_3d = sum(in_3d & behavior_type==4L),
+  i_buy_4d = sum(in_4d & behavior_type==4L),
+  i_buy_5d = sum(in_5d & behavior_type==4L),
+  i_buy_6d = sum(in_6d & behavior_type==4L),
   i_buy_7d = sum(in_7d & behavior_type==4L)
 ), by = item_id]
 
@@ -163,11 +211,33 @@ ui_cnt[, `:=`(
 )]
 
 ui_win <- dt[, .(
-  ui_act_1d = sum(in_1d),
-  ui_act_3d = sum(in_3d),
-  ui_act_7d = sum(in_7d),
+  ui_view_1d = sum(in_1d & behavior_type==1L),
+  ui_view_2d = sum(in_2d & behavior_type==1L),
+  ui_view_3d = sum(in_3d & behavior_type==1L),
+  ui_view_4d = sum(in_4d & behavior_type==1L),
+  ui_view_5d = sum(in_5d & behavior_type==1L),
+  ui_view_6d = sum(in_6d & behavior_type==1L),
+  ui_view_7d = sum(in_7d & behavior_type==1L),
+  ui_fav_1d = sum(in_1d & behavior_type==2L),
+  ui_fav_2d = sum(in_2d & behavior_type==2L),
+  ui_fav_3d = sum(in_3d & behavior_type==2L),
+  ui_fav_4d = sum(in_4d & behavior_type==2L),
+  ui_fav_5d = sum(in_5d & behavior_type==2L),
+  ui_fav_6d = sum(in_6d & behavior_type==2L),
+  ui_fav_7d = sum(in_7d & behavior_type==2L),
+  ui_cart_1d = sum(in_1d & behavior_type==3L),
+  ui_cart_2d = sum(in_2d & behavior_type==3L),
+  ui_cart_3d = sum(in_3d & behavior_type==3L),
+  ui_cart_4d = sum(in_4d & behavior_type==3L),
+  ui_cart_5d = sum(in_5d & behavior_type==3L),
+  ui_cart_6d = sum(in_6d & behavior_type==3L),
+  ui_cart_7d = sum(in_7d & behavior_type==3L),
   ui_buy_1d = sum(in_1d & behavior_type==4L),
+  ui_buy_2d = sum(in_2d & behavior_type==4L),
   ui_buy_3d = sum(in_3d & behavior_type==4L),
+  ui_buy_4d = sum(in_4d & behavior_type==4L),
+  ui_buy_5d = sum(in_5d & behavior_type==4L),
+  ui_buy_6d = sum(in_6d & behavior_type==4L),
   ui_buy_7d = sum(in_7d & behavior_type==4L)
 ), by = .(user_id, item_id)]
 
@@ -321,6 +391,18 @@ meaning <- function(f) {
   else if (grepl("^ui_", f)) "user-item"
   else "meta"
 
+  m <- regexec("^(u|i|ui)_(view|fav|cart|buy)_([1-7])d$", f)
+  g <- regmatches(f, m)[[1]]
+  if (length(g) > 0) {
+    lvl_map <- c(u = "user", i = "item", ui = "user-item")
+    act_map <- c(view = "view", fav = "favorite", cart = "add-to-cart", buy = "purchase")
+    lv <- lvl_map[g[2]]
+    act <- act_map[g[3]]
+    d <- as.integer(g[4])
+    day_word <- ifelse(d == 1, "day", "days")
+    return(sprintf("%s %s count in last %d %s", lv, act, d, day_word))
+  }
+  
   #同类计数
   # user级
   if (grepl("^u_item_nunique$", f)) return("user number of distinct items interacted")
@@ -364,7 +446,11 @@ meaning <- function(f) {
 
   #时间窗口
   if (grepl("_1d$", f)) return(paste(lvl, "count in last 1 day"))
+  if (grepl("_2d$", f)) return(paste(lvl, "count in last 2 days"))
   if (grepl("_3d$", f)) return(paste(lvl, "count in last 3 days"))
+  if (grepl("_4d$", f)) return(paste(lvl, "count in last 4 days"))
+  if (grepl("_5d$", f)) return(paste(lvl, "count in last 5 days"))
+  if (grepl("_6d$", f)) return(paste(lvl, "count in last 6 days"))
   if (grepl("_7d$", f)) return(paste(lvl, "count in last 7 days"))
 
   #交叉特征
