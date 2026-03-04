@@ -1,0 +1,164 @@
+---
+title: "Model construction"
+author: "Loih"
+date: "2026-02-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("R/R_setup.R")
+```
+
+
+```{r}
+# AUC-ROC + PR-AUC + classification metrics
+calc_metrics <- function(y_true, y_prob, threshold = 0.5, eps = 1e-15) {
+  y_true <- as.integer(y_true)
+  y_prob <- as.numeric(y_prob)
+
+  auc_val <- tryCatch(as.numeric(pROC::auc(y_true, y_prob)), error = function(e) NA_real_)
+
+  pr_val <- tryCatch({
+    fg <- y_prob[y_true == 1L]
+    bg <- y_prob[y_true == 0L]
+    as.numeric(PRROC::pr.curve(scores.class0 = fg, scores.class1 = bg, curve = FALSE)$auc.integral)
+  }, error = function(e) NA_real_)
+
+  pred <- as.integer(y_prob >= threshold)
+  tp <- sum(pred == 1L & y_true == 1L)
+  fp <- sum(pred == 1L & y_true == 0L)
+  fn <- sum(pred == 0L & y_true == 1L)
+  tn <- sum(pred == 0L & y_true == 0L)
+
+  precision <- tp / (tp + fp + eps)
+  recall    <- tp / (tp + fn + eps)
+  f1        <- 2 * precision * recall / (precision + recall + eps)
+  acc       <- (tp + tn) / (tp + tn + fp + fn + eps)
+
+  p <- pmax(pmin(y_prob, 1 - eps), eps)
+  logloss <- -mean(y_true * log(p) + (1 - y_true) * log(1 - p))
+
+  data.table(
+    threshold = threshold,
+    AUC = auc_val,
+    PRAUC = pr_val,
+    Accuracy = acc,
+    Precision = precision,
+    Recall = recall,
+    F1 = f1,
+    LogLoss = logloss
+  )
+}
+
+find_best_threshold <- function(y_true, y_prob, th_seq = seq(0.05, 0.95, by = 0.01)) {
+  scan_tbl <- rbindlist(lapply(th_seq, function(th) calc_metrics(y_true, y_prob, th)))
+  best_row <- scan_tbl[which.max(F1)]
+  list(best = best_row, scan = scan_tbl)
+}
+
+```
+
+
+```{r}
+#读取
+# NOTE: You were reading from dir_model; keep as-is to match your pipeline.
+train_dt <- fread(file.path(dir_model, "train_set_final.csv"))
+val_dt   <- fread(file.path(dir_model, "val_set_final.csv"))
+test_dt  <- fread(file.path(dir_model, "test_set_final.csv"))
+
+label_col <- "label_buy"
+
+#标准化标签到0/1
+for (DT in list(train_dt, val_dt, test_dt)) {
+  DT[, (label_col) := as.integer(get(label_col))]
+}
+train_dt <- train_dt[get(label_col) %in% c(0L, 1L)]
+val_dt   <- val_dt[get(label_col) %in% c(0L, 1L)]
+test_dt  <- test_dt[get(label_col) %in% c(0L, 1L)]
+
+stopifnot(nrow(train_dt) > 0, nrow(val_dt) > 0, nrow(test_dt) > 0)
+
+#特征列定义
+# leakage & non-feature columns
+leak_cols <- c("ui_buy", "ui_buy_rate", "ui_buy_1d", "ui_buy_2d", "ui_buy_3d", "ui_buy_4d", "ui_buy_5d", "ui_buy_6d", "ui_buy_7d")
+exclude_cols <- c(
+  "user_id", "item_id", "split", label_col,
+  "u_pref_hour", "u_pref_dow", "i_cat",
+  "u_first_time", "u_last_time", "i_first_time", "i_last_time",
+  "ui_first_time", "ui_last_time", "u_label_buy",
+  leak_cols
+)
+
+#读取字典
+dict_file <- file.path(dir_dict, "feature_dictionary_final.csv")
+  keep_cols <- fread(dict_file)$feature
+  keep_cols <- intersect(keep_cols, names(train_dt))
+  feat_cols <- setdiff(keep_cols, exclude_cols)
+  feat_cols <- feat_cols[sapply(train_dt[, ..feat_cols], is.numeric)]
+
+
+#保证训练和验证集有相同特征列
+feat_cols <- Reduce(intersect, list(feat_cols, names(train_dt), names(val_dt), names(test_dt)))
+stopifnot(length(feat_cols) > 0)
+
+
+#类别不平衡权重
+pos_rate <- train_dt[, mean(get(label_col) == 1L)]
+neg_rate <- 1 - pos_rate
+w_pos <- neg_rate / max(pos_rate, 1e-9)
+train_dt[, weight := ifelse(get(label_col) == 1L, w_pos, 1.0)]
+
+#训练 GLM
+fm <- as.formula(paste(label_col, "~", paste(feat_cols, collapse = " + ")))
+
+glm_fit <- glm(
+  formula = fm,
+  data = as.data.frame(train_dt[, c(label_col, feat_cols, "weight"), with = FALSE]),
+  family = binomial(link = "logit"),
+  weights = weight
+)
+
+#预测
+val_prob_glm  <- as.numeric(predict(glm_fit, newdata = as.data.frame(val_dt[, ..feat_cols]), type = "response"))
+test_prob_glm <- as.numeric(predict(glm_fit, newdata = as.data.frame(test_dt[, ..feat_cols]), type = "response"))
+
+#验证集阈值&评估测试集
+best_glm <- find_best_threshold(val_dt[[label_col]], val_prob_glm)
+val_best  <- best_glm$best
+best_thr  <- val_best$threshold
+
+test_best <- calc_metrics(test_dt[[label_col]], test_prob_glm, threshold = best_thr)
+
+cat("\n[GLM] Best threshold on VAL =", best_thr, "\n")
+print(val_best)
+print(test_best)
+
+#保存输出
+fwrite(best_glm$scan, file.path(dir_model, "glm_val_threshold_scan.csv"))
+fwrite(val_best,      file.path(dir_model, "glm_val_best_metrics.csv"))
+fwrite(test_best,     file.path(dir_model, "glm_test_metrics.csv"))
+
+coef_tab <- summary(glm_fit)$coefficients
+coef_dt <- data.table(
+  feature = rownames(coef_tab),
+  coef = coef_tab[, 1],
+  se   = coef_tab[, 2],
+  z    = coef_tab[, 3],
+  p    = coef_tab[, 4]
+)
+coef_dt <- coef_dt[feature != "(Intercept)"]
+coef_dt[, odds_ratio := exp(coef)]
+coef_dt[, abs_z := abs(z)]
+setorder(coef_dt, -abs_z)
+coef_dt[, abs_z := NULL]
+
+fwrite(coef_dt, file.path(dir_model, "glm_feature_importance.csv"))
+
+```
+
+
+
+
+
+

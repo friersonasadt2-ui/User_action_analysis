@@ -38,17 +38,15 @@ exclude_cols <- c(
 feat_cols <- setdiff(names(train_dt)[sapply(train_dt, is.numeric)], exclude_cols)
 
 #去掉零方差和常数特征
-nzv <- feat_cols[sapply(feat_cols, function(cn) {
-  x <- train_dt[[cn]]
-  x <- x[is.finite(x)]
-  length(x) == 0 || var(x, na.rm = TRUE) == 0
-})]
+X0 <- as.matrix(train_dt[, ..feat_cols])
+var_vec <- matrixStats::colVars(X0, na.rm = TRUE)
+names(var_vec) <- feat_cols
+nzv <- names(var_vec)[!is.finite(var_vec) | var_vec == 0]
 feat_cols1 <- setdiff(feat_cols, nzv)
 
 cat("Numeric feature candidates:", length(feat_cols), "\n")
 cat("Remove zero-variance:", length(nzv), "\n")
 
-#相关性过滤
 corr_threshold <- 0.95
 
 X <- as.matrix(train_dt[, ..feat_cols1])
@@ -64,13 +62,15 @@ corr_pairs[, abs_corr := abs(corr)]
 setorder(corr_pairs, -abs_corr)
 corr_pairs[, abs_corr := NULL]
 
-# “与标签相关性更强”的保留规则
 y <- train_dt[[label_col]]
-score_with_label <- function(cn) {
-  x <- train_dt[[cn]]
-  if (all(!is.finite(x))) return(0)
-  suppressWarnings(abs(cor(x, y, use = "pairwise.complete.obs")))
-}
+lab_cor <- suppressWarnings(cor(X, y, use = "pairwise.complete.obs"))
+lab_cor[!is.finite(lab_cor)] <- 0
+lab_cor <- abs(lab_cor)
+names(lab_cor) <- colnames(X)
+
+var_map <- matrixStats::colVars(X, na.rm = TRUE)
+var_map[!is.finite(var_map)] <- 0
+names(var_map) <- colnames(X)
 
 to_drop_corr <- character(0)
 
@@ -80,23 +80,22 @@ if (nrow(corr_pairs) > 0) {
     b <- corr_pairs$f2[i]
     if (a %in% to_drop_corr || b %in% to_drop_corr) next
 
-    sa <- score_with_label(a); if (is.na(sa)) sa <- 0
-    sb <- score_with_label(b); if (is.na(sb)) sb <- 0
+    sa <- lab_cor[a]; if (is.na(sa)) sa <- 0
+    sb <- lab_cor[b]; if (is.na(sb)) sb <- 0
 
     if (sa > sb) {
       to_drop_corr <- c(to_drop_corr, b)
     } else if (sb > sa) {
       to_drop_corr <- c(to_drop_corr, a)
     } else {
-      va <- var(train_dt[[a]], na.rm = TRUE); if (is.na(va)) va <- 0
-      vb <- var(train_dt[[b]], na.rm = TRUE); if (is.na(vb)) vb <- 0
+      va <- var_map[a]; if (is.na(va)) va <- 0
+      vb <- var_map[b]; if (is.na(vb)) vb <- 0
       to_drop_corr <- c(to_drop_corr, ifelse(va >= vb, b, a))
     }
   }
 }
 
 to_drop_corr <- unique(to_drop_corr)
-
 keep_cols <- setdiff(feat_cols, c(nzv, to_drop_corr))
 
 
@@ -155,12 +154,26 @@ fwrite(feat_dict_filtered, file.path(dir_dict,"feature_dictionary_filtered.csv")
 
 
 ```{r}
+data.table::setDTthreads(1L)
+options(datatable.auto.index = FALSE)
+options(datatable.use.index = FALSE)
+
+# 尽量释放旧对象
+rm_list <- intersect(c(
+  "uni_tbl","out_tbl","tmp_rank","corr_pairs","C","X","X0",
+  "df_glm","d2","sm","imp_logit","perm_imp",
+  "auc_vals","iv_vals"
+), ls())
+if (length(rm_list)) rm(list = rm_list)
+invisible(gc())
+
 #读取keep_cols
 keep_cols <- fread(file.path(dir_dict, "feature_dictionary_filtered.csv"))$feature
 keep_cols <- intersect(keep_cols, names(train_dt))
 
 feat_cols <- setdiff(keep_cols, exclude_cols)
 feat_cols <- feat_cols[sapply(train_dt[, ..feat_cols], is.numeric)]
+
 
 #标签必须是0/1
 train_dt[, (label_col) := as.integer(get(label_col))]
@@ -187,14 +200,13 @@ fast_auc <- function(score, y) {
 
 #单变量IV(分箱+WOE/IV)
 calc_iv_woe <- function(dt, x_col, y_col = "label_buy", n_bins = 10, eps = 0.5,
-                        zero_bin = TRUE, zero_bin_ratio = 0.2) {
+                        zero_bin = TRUE, zero_bin_ratio = 0.2){
   stopifnot(x_col %in% names(dt), y_col %in% names(dt))
 
   tmp <- dt[, .(x = as.numeric(get(x_col)), y = as.integer(get(y_col)))]
   tmp <- tmp[is.finite(x) & y %in% c(0L, 1L)]
   if (nrow(tmp) == 0) return(list(iv = 0, detail = data.table()))
 
-  #常数/几乎常数，IV=0
   if (uniqueN(tmp$x) <= 1) {
     tab <- tmp[, .(good = sum(y == 0L), bad = sum(y == 1L)), by = .(bin = "all")]
     tab[, `:=`(good = as.numeric(good), bad = as.numeric(bad))]
@@ -210,102 +222,69 @@ calc_iv_woe <- function(dt, x_col, y_col = "label_buy", n_bins = 10, eps = 0.5,
   #分箱
   x0_ratio <- mean(tmp$x == 0, na.rm = TRUE)
 
-  #0很多让0单独一箱，非0再分箱
-  if (zero_bin && x0_ratio >= zero_bin_ratio && any(tmp$x == 0)) {
+if (zero_bin && x0_ratio >= zero_bin_ratio && any(tmp$x == 0)) {
     tmp[, bin := fifelse(x == 0, "0", NA_character_)]
 
     tmp[x != 0, bin := {
       x2 <- x
       qs <- unique(quantile(x2, probs = seq(0, 1, length.out = n_bins), na.rm = TRUE, type = 7))
-
-      #分位点塌陷用rank分箱
-      if (length(qs) < 3) {
-        r <- frank(x2, ties.method = "average")
-        qs2 <- unique(quantile(r, probs = seq(0, 1, length.out = n_bins), na.rm = TRUE, type = 7))
-        if (length(qs2) < 3) {
-          rep("nonzero", .N)
-        } else {
-          as.character(cut(r, breaks = qs2, include.lowest = TRUE, right = TRUE))
-        }
+      if (length(qs) < 2) {
+        rep("nz_all", .N)
       } else {
         as.character(cut(x2, breaks = qs, include.lowest = TRUE, right = TRUE))
       }
     }]
-
   } else {
-    #普通分位数分箱
     qs <- unique(quantile(tmp$x, probs = seq(0, 1, length.out = n_bins + 1), na.rm = TRUE, type = 7))
-
-    if (length(qs) < 3) {
-      #分位点塌陷用rank分箱
-      r <- frank(tmp$x, ties.method = "average")
-      qs2 <- unique(quantile(r, probs = seq(0, 1, length.out = n_bins + 1), na.rm = TRUE, type = 7))
-      if (length(qs2) < 3) {
-        tmp[, bin := "all"]
-      } else {
-        tmp[, bin := as.character(cut(r, breaks = qs2, include.lowest = TRUE, right = TRUE))]
-      }
+    if (length(qs) < 2) {
+      tmp[, bin := "all"]
     } else {
       tmp[, bin := as.character(cut(x, breaks = qs, include.lowest = TRUE, right = TRUE))]
     }
   }
-
-  #如果最终只剩1个bin，IV=0
-  if (uniqueN(tmp$bin) <= 1) {
-    return(list(iv = 0, detail = data.table()))
-  }
-
+  
   #WOE/IV
-  tab <- tmp[, .(
-    good = sum(y == 0L, na.rm = TRUE),
-    bad  = sum(y == 1L, na.rm = TRUE)
-  ), by = bin]
-
+  tab <- tmp[, .(good = sum(y == 0L), bad = sum(y == 1L)), by = bin]
   tab[, `:=`(good = as.numeric(good), bad = as.numeric(bad))]
   tab[good == 0, good := eps]
   tab[bad  == 0, bad  := eps]
 
-  G <- sum(tab$good); B <- sum(tab$bad)
-  if (!is.finite(G) || !is.finite(B) || G <= 0 || B <= 0) return(list(iv = 0, detail = tab))
-
-  tab[, `:=`(
-    dist_good = good / G,
-    dist_bad  = bad  / B
-  )]
-
+  G <- sum(tab$good)
+  B <- sum(tab$bad)
+  tab[, `:=`(dist_good = good / G, dist_bad = bad / B)]
   tab[, woe := log(dist_bad / dist_good)]
   tab[, iv_part := (dist_bad - dist_good) * woe]
-  iv <- sum(tab$iv_part)
-  if (!is.finite(iv)) iv <- 0
+  iv <- sum(tab$iv_part, na.rm = TRUE)
 
-  list(iv = as.numeric(iv), detail = tab[order(-abs(woe))])
+  list(iv = as.numeric(iv), detail = tab[order(bin)])
 }
 
 #单变量验证汇总表(AUC/IV和基本统计)
+data.table::setDTthreads(1L)
+
 y <- train_dt[[label_col]]
 
-uni_tbl <- rbindlist(lapply(feat_cols, function(cn) {
-  x <- train_dt[[cn]]
-  iv_res <- calc_iv_woe(train_dt, cn, y_col = label_col, n_bins = 10, eps = 0.5)
+auc_vals <- vapply(feat_cols, function(cn) fast_auc(train_dt[[cn]], y), numeric(1))
+iv_vals  <- vapply(feat_cols, function(cn) calc_iv_woe(train_dt, cn, y_col = label_col)$iv, numeric(1))
 
-  data.table(
-    feature = cn,
-    n = length(x),
-    na_rate = mean(!is.finite(x)),
-    mean = suppressWarnings(mean(x, na.rm = TRUE)),
-    sd   = suppressWarnings(sd(x, na.rm = TRUE)),
-    auc  = fast_auc(x, y),
-    iv   = iv_res$iv
-  )
-}), use.names = TRUE, fill = TRUE)
+univ_tbl <- data.table(
+  feature = feat_cols,
+  auc = as.numeric(auc_vals),
+  iv = as.numeric(iv_vals)
+)
 
 #输出到 validation_uni
-fwrite(uni_tbl[order(-auc)], file.path(dir_uni, "univariate_auc_iv.csv"))
+out_tbl <- univ_tbl[, .(feature, auc, iv)]
+out_tbl[is.na(auc), auc := -Inf]
+setorder(out_tbl, -auc)
+fwrite(out_tbl, file.path(dir_uni, "univariate_auc_iv.csv"))
+rm(out_tbl)
+gc()
 
 
 #特征重要性：Logistic 回归
-topK <- min(35, length(feat_cols))
-feat_for_logit <- uni_tbl[order(-auc)][1:topK, feature]
+topK <- min(35L, nrow(univ_tbl))
+feat_for_logit <- univ_tbl[order(-auc)][1:topK, feature]
 
 df_glm <- as.data.frame(train_dt[, c(label_col, feat_for_logit), with = FALSE])
 df_glm[[label_col]] <- as.integer(df_glm[[label_col]])
@@ -351,7 +330,13 @@ fwrite(perm_imp, file.path(dir_multi, "importance_perm.csv"))
 
 ```
 
+
 ```{r}
+data.table::setDTthreads(1L)
+options(datatable.auto.index = FALSE)
+options(datatable.use.index = FALSE)
+invisible(gc())
+
 drop_feats <- c(
   #单变量几乎无信息(AUC≈0.50 且 IV≈0)
   "i_fav_1d","i_fav_2d","i_fav_3d","i_fav_4d","i_fav_5d","i_fav_6d","i_fav_7d",
@@ -399,16 +384,6 @@ fwrite(all_dt_final, file.path(dir_feat, "all_set_final.csv"))
 fwrite(feat_dict_final, file.path(dir_dict, "feature_dictionary_final.csv"), bom = TRUE)
 
 ```
-
-
-
-
-
-
-
-
-
-
 
 
 

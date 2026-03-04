@@ -64,8 +64,14 @@ dt[, `:=`(
   in_7d = days_to_end <= 7
 )]
 
-
-#user-level 特征
+dt[, win_day := fifelse(days_to_end <= 1, 1L,
+                 fifelse(days_to_end <= 2, 2L,
+                 fifelse(days_to_end <= 3, 3L,
+                 fifelse(days_to_end <= 4, 4L,
+                 fifelse(days_to_end <= 5, 5L,
+                 fifelse(days_to_end <= 6, 6L,
+                 fifelse(days_to_end <= 7, 7L, NA_integer_)))))))]
+#user-level特征
 u_cnt <- dt[, .(
   u_act_total = .N,
   u_view = sum(behavior_type==1L),
@@ -93,48 +99,30 @@ u_pref_hour <- u_pref_hour[, .SD[1], by = user_id][, .(user_id, u_pref_hour = ho
 u_pref_dow <- dt[, .N, by = .(user_id, dow)][order(user_id, -N)]
 u_pref_dow <- u_pref_dow[, .SD[1], by = user_id][, .(user_id, u_pref_dow = dow)]
 
-u_win <- dt[, .(
-  u_view_1d = sum(in_1d & behavior_type==1L),
-  u_view_2d = sum(in_2d & behavior_type==1L),
-  u_view_3d = sum(in_3d & behavior_type==1L),
-  u_view_4d = sum(in_4d & behavior_type==1L),
-  u_view_5d = sum(in_5d & behavior_type==1L),
-  u_view_6d = sum(in_6d & behavior_type==1L),
-  u_view_7d = sum(in_7d & behavior_type==1L),
-  u_fav_1d = sum(in_1d & behavior_type==2L),
-  u_fav_2d = sum(in_2d & behavior_type==2L),
-  u_fav_3d = sum(in_3d & behavior_type==2L),
-  u_fav_4d = sum(in_4d & behavior_type==2L),
-  u_fav_5d = sum(in_5d & behavior_type==2L),
-  u_fav_6d = sum(in_6d & behavior_type==2L),
-  u_fav_7d = sum(in_7d & behavior_type==2L),
-  u_cart_1d = sum(in_1d & behavior_type==3L),
-  u_cart_2d = sum(in_2d & behavior_type==3L),
-  u_cart_3d = sum(in_3d & behavior_type==3L),
-  u_cart_4d = sum(in_4d & behavior_type==3L),
-  u_cart_5d = sum(in_5d & behavior_type==3L),
-  u_cart_6d = sum(in_6d & behavior_type==3L),
-  u_cart_7d = sum(in_7d & behavior_type==3L),
-  u_buy_1d = sum(in_1d & behavior_type==4L),
-  u_buy_2d = sum(in_2d & behavior_type==4L),
-  u_buy_3d = sum(in_3d & behavior_type==4L),
-  u_buy_4d = sum(in_4d & behavior_type==4L),
-  u_buy_5d = sum(in_5d & behavior_type==4L),
-  u_buy_6d = sum(in_6d & behavior_type==4L),
-  u_buy_7d = sum(in_7d & behavior_type==4L)
-), by = user_id]
+tmp_u <- dt[!is.na(win_day), .N, by = .(user_id, behavior_type, win_day)]
+u_keys <- unique(dt[, .(user_id)])
+grid_u <- u_keys[, CJ(behavior_type = 1:4, win_day = 1:7), by = user_id]
 
-user_features <- Reduce(function(x,y) merge(x,y, by="user_id", all.x=TRUE),
-                        list(u_cnt, u_pref_hour, u_pref_dow, u_win))
+tmp_u <- tmp_u[grid_u, on = .(user_id, behavior_type, win_day)]
+tmp_u[is.na(N), N := 0L]
+setorder(tmp_u, user_id, behavior_type, win_day)
+tmp_u[, cumN := cumsum(N), by = .(user_id, behavior_type)]
 
-for (cn in names(user_features)) {
-  if (is.numeric(user_features[[cn]])) user_features[is.na(get(cn)), (cn) := 0]
-}
-user_features[is.na(u_pref_hour), u_pref_hour := -1L]
-user_features[is.na(u_pref_dow),  u_pref_dow  := -1L]
+u_long <- tmp_u[, .(
+  user_id,
+  feature = paste0(
+    "u_",
+    fifelse(behavior_type==1L, "view",
+    fifelse(behavior_type==2L, "fav",
+    fifelse(behavior_type==3L, "cart", "buy"))),
+    "_", win_day, "d"
+  ),
+  value = cumN
+)]
 
+u_win <- dcast(u_long, user_id ~ feature, value.var = "value", fill = 0)
 
-#item-level 特征
+#item-level特征
 i_cnt <- dt[, .(
   i_act_total = .N,
   i_view = sum(behavior_type==1L),
@@ -153,44 +141,30 @@ i_cnt[, `:=`(
   i_buy_share = i_buy / (i_act_total + eps)
 )]
 
-i_win <- dt[, .(
-  i_view_1d = sum(in_1d & behavior_type==1L),
-  i_view_2d = sum(in_2d & behavior_type==1L),
-  i_view_3d = sum(in_3d & behavior_type==1L),
-  i_view_4d = sum(in_4d & behavior_type==1L),
-  i_view_5d = sum(in_5d & behavior_type==1L),
-  i_view_6d = sum(in_6d & behavior_type==1L),
-  i_view_7d = sum(in_7d & behavior_type==1L),
-  i_fav_1d = sum(in_1d & behavior_type==2L),
-  i_fav_2d = sum(in_2d & behavior_type==2L),
-  i_fav_3d = sum(in_3d & behavior_type==2L),
-  i_fav_4d = sum(in_4d & behavior_type==2L),
-  i_fav_5d = sum(in_5d & behavior_type==2L),
-  i_fav_6d = sum(in_6d & behavior_type==2L),
-  i_fav_7d = sum(in_7d & behavior_type==2L),
-  i_cart_1d = sum(in_1d & behavior_type==3L),
-  i_cart_2d = sum(in_2d & behavior_type==3L),
-  i_cart_3d = sum(in_3d & behavior_type==3L),
-  i_cart_4d = sum(in_4d & behavior_type==3L),
-  i_cart_5d = sum(in_5d & behavior_type==3L),
-  i_cart_6d = sum(in_6d & behavior_type==3L),
-  i_cart_7d = sum(in_7d & behavior_type==3L),
-  i_buy_1d = sum(in_1d & behavior_type==4L),
-  i_buy_2d = sum(in_2d & behavior_type==4L),
-  i_buy_3d = sum(in_3d & behavior_type==4L),
-  i_buy_4d = sum(in_4d & behavior_type==4L),
-  i_buy_5d = sum(in_5d & behavior_type==4L),
-  i_buy_6d = sum(in_6d & behavior_type==4L),
-  i_buy_7d = sum(in_7d & behavior_type==4L)
-), by = item_id]
+tmp_i <- dt[!is.na(win_day), .N, by = .(item_id, behavior_type, win_day)]
+i_keys <- unique(dt[, .(item_id)])
+grid_i <- i_keys[, CJ(behavior_type = 1:4, win_day = 1:7), by = item_id]
 
-item_features <- merge(i_cnt, i_win, by="item_id", all.x=TRUE)
-for (cn in names(item_features)) {
-  if (is.numeric(item_features[[cn]])) item_features[is.na(get(cn)), (cn) := 0]
-}
+tmp_i <- tmp_i[grid_i, on = .(item_id, behavior_type, win_day)]
+tmp_i[is.na(N), N := 0L]
+setorder(tmp_i, item_id, behavior_type, win_day)
+tmp_i[, cumN := cumsum(N), by = .(item_id, behavior_type)]
 
+i_long <- tmp_i[, .(
+  item_id,
+  feature = paste0(
+    "i_",
+    fifelse(behavior_type==1L, "view",
+    fifelse(behavior_type==2L, "fav",
+    fifelse(behavior_type==3L, "cart", "buy"))),
+    "_", win_day, "d"
+  ),
+  value = cumN
+)]
 
-#user-item-level 特征
+i_win <- dcast(i_long, item_id ~ feature, value.var = "value", fill = 0)
+
+#user-item-level特征
 ui_cnt <- dt[, .(
   ui_act_total = .N,
   ui_view = sum(behavior_type==1L),
@@ -210,42 +184,82 @@ ui_cnt[, `:=`(
   ui_recency_hours = as.numeric(difftime(time_max, ui_last_time, units="hours"))
 )]
 
-ui_win <- dt[, .(
-  ui_view_1d = sum(in_1d & behavior_type==1L),
-  ui_view_2d = sum(in_2d & behavior_type==1L),
-  ui_view_3d = sum(in_3d & behavior_type==1L),
-  ui_view_4d = sum(in_4d & behavior_type==1L),
-  ui_view_5d = sum(in_5d & behavior_type==1L),
-  ui_view_6d = sum(in_6d & behavior_type==1L),
-  ui_view_7d = sum(in_7d & behavior_type==1L),
-  ui_fav_1d = sum(in_1d & behavior_type==2L),
-  ui_fav_2d = sum(in_2d & behavior_type==2L),
-  ui_fav_3d = sum(in_3d & behavior_type==2L),
-  ui_fav_4d = sum(in_4d & behavior_type==2L),
-  ui_fav_5d = sum(in_5d & behavior_type==2L),
-  ui_fav_6d = sum(in_6d & behavior_type==2L),
-  ui_fav_7d = sum(in_7d & behavior_type==2L),
-  ui_cart_1d = sum(in_1d & behavior_type==3L),
-  ui_cart_2d = sum(in_2d & behavior_type==3L),
-  ui_cart_3d = sum(in_3d & behavior_type==3L),
-  ui_cart_4d = sum(in_4d & behavior_type==3L),
-  ui_cart_5d = sum(in_5d & behavior_type==3L),
-  ui_cart_6d = sum(in_6d & behavior_type==3L),
-  ui_cart_7d = sum(in_7d & behavior_type==3L),
-  ui_buy_1d = sum(in_1d & behavior_type==4L),
-  ui_buy_2d = sum(in_2d & behavior_type==4L),
-  ui_buy_3d = sum(in_3d & behavior_type==4L),
-  ui_buy_4d = sum(in_4d & behavior_type==4L),
-  ui_buy_5d = sum(in_5d & behavior_type==4L),
-  ui_buy_6d = sum(in_6d & behavior_type==4L),
-  ui_buy_7d = sum(in_7d & behavior_type==4L)
-), by = .(user_id, item_id)]
+# 只保留7天内
+ui_base <- dt[!is.na(win_day), .(user_id, item_id, behavior_type, win_day)]
 
+# 每个(ui, behavior, day)计数
+ui_day <- ui_base[, .N, by = .(user_id, item_id, behavior_type, win_day)]
+
+# 用 dcast 先转成 7 列（缺失填 0）
+ui_wide_day <- dcast(
+  ui_day,
+  user_id + item_id + behavior_type ~ win_day,
+  value.var = "N",
+  fill = 0
+)
+
+# 确保 1~7 列都在
+miss_days <- setdiff(as.character(1:7), names(ui_wide_day))
+if (length(miss_days)) {
+  ui_wide_day[, (miss_days) := 0L]
+}
+
+# 按窗口做累计和：1d~7d
+for (k in 2:7) {
+  prev <- as.character(k - 1)
+  cur  <- as.character(k)
+  ui_wide_day[, (cur) := get(cur) + get(prev)]
+}
+
+# 拉长后再透视成最终 ui_***_xd
+ui_long <- melt(
+  ui_wide_day,
+  id.vars = c("user_id", "item_id", "behavior_type"),
+  measure.vars = as.character(1:7),
+  variable.name = "win_day",
+  value.name = "value"
+)
+
+ui_long[, win_day := as.integer(as.character(win_day))]
+
+ui_long[, feature := paste0(
+  "ui_",
+  fifelse(behavior_type==1L, "view",
+  fifelse(behavior_type==2L, "fav",
+  fifelse(behavior_type==3L, "cart",
+  fifelse(behavior_type==4L, "buy", "other")))),
+  "_", win_day, "d"
+)]
+
+ui_win <- dcast(
+  ui_long[feature != "ui_other_1d" & feature != "ui_other_2d" &
+            feature != "ui_other_3d" & feature != "ui_other_4d" &
+            feature != "ui_other_5d" & feature != "ui_other_6d" &
+            feature != "ui_other_7d"],
+  user_id + item_id ~ feature,
+  value.var = "value",
+  fill = 0
+)
+
+user_features <- Reduce(function(x,y) merge(x,y, by="user_id", all.x=TRUE),
+                        list(u_cnt, u_pref_hour, u_pref_dow, u_win))
+
+item_features <- merge(i_cnt, i_win, by="item_id", all.x=TRUE)
 ui_features <- merge(ui_cnt, ui_win, by=c("user_id","item_id"), all.x=TRUE)
+
+for (cn in names(user_features)) {
+  if (is.numeric(user_features[[cn]])) user_features[is.na(get(cn)), (cn) := 0]
+}
+user_features[is.na(u_pref_hour), u_pref_hour := -1L]
+user_features[is.na(u_pref_dow),  u_pref_dow  := -1L]
+
+for (cn in names(item_features)) {
+  if (is.numeric(item_features[[cn]])) item_features[is.na(get(cn)), (cn) := 0]
+}
+
 for (cn in names(ui_features)) {
   if (is.numeric(ui_features[[cn]])) ui_features[is.na(get(cn)), (cn) := 0]
 }
-
 
 
 #合并成最终样本（user_id, item_id 一行一对）
