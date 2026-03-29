@@ -60,9 +60,10 @@ find_best_threshold <- function(y_true, y_prob, th_seq = seq(0.05, 0.95, by = 0.
 ```
 
 
+
+
 ```{r}
 #读取
-# NOTE: You were reading from dir_model; keep as-is to match your pipeline.
 train_dt <- fread(file.path(dir_model, "train_set_final.csv"))
 val_dt   <- fread(file.path(dir_model, "val_set_final.csv"))
 test_dt  <- fread(file.path(dir_model, "test_set_final.csv"))
@@ -76,12 +77,11 @@ for (DT in list(train_dt, val_dt, test_dt)) {
 train_dt <- train_dt[get(label_col) %in% c(0L, 1L)]
 val_dt   <- val_dt[get(label_col) %in% c(0L, 1L)]
 test_dt  <- test_dt[get(label_col) %in% c(0L, 1L)]
-
 stopifnot(nrow(train_dt) > 0, nrow(val_dt) > 0, nrow(test_dt) > 0)
 
-#特征列定义
-# leakage & non-feature columns
+# 特征列定义
 leak_cols <- c("ui_buy", "ui_buy_rate", "ui_buy_1d", "ui_buy_2d", "ui_buy_3d", "ui_buy_4d", "ui_buy_5d", "ui_buy_6d", "ui_buy_7d")
+
 exclude_cols <- c(
   "user_id", "item_id", "split", label_col,
   "u_pref_hour", "u_pref_dow", "i_cat",
@@ -92,24 +92,25 @@ exclude_cols <- c(
 
 #读取字典
 dict_file <- file.path(dir_dict, "feature_dictionary_final.csv")
-  keep_cols <- fread(dict_file)$feature
-  keep_cols <- intersect(keep_cols, names(train_dt))
-  feat_cols <- setdiff(keep_cols, exclude_cols)
-  feat_cols <- feat_cols[sapply(train_dt[, ..feat_cols], is.numeric)]
+keep_cols <- fread(dict_file)$feature
+keep_cols <- intersect(keep_cols, names(train_dt))
 
+feat_cols <- setdiff(keep_cols, exclude_cols)
+feat_cols <- feat_cols[sapply(train_dt[, ..feat_cols], is.numeric)]
 
-#保证训练和验证集有相同特征列
+#保证 train/val/test 都有
 feat_cols <- Reduce(intersect, list(feat_cols, names(train_dt), names(val_dt), names(test_dt)))
 stopifnot(length(feat_cols) > 0)
 
+cat("Initial features:", length(feat_cols), "\n")
 
-#类别不平衡权重
+# 类别不平衡权重
 pos_rate <- train_dt[, mean(get(label_col) == 1L)]
 neg_rate <- 1 - pos_rate
 w_pos <- neg_rate / max(pos_rate, 1e-9)
 train_dt[, weight := ifelse(get(label_col) == 1L, w_pos, 1.0)]
 
-#训练 GLM
+#先训练一版 GLM 
 fm <- as.formula(paste(label_col, "~", paste(feat_cols, collapse = " + ")))
 
 glm_fit <- glm(
@@ -119,18 +120,15 @@ glm_fit <- glm(
   weights = weight
 )
 
-#预测
 val_prob_glm  <- as.numeric(predict(glm_fit, newdata = as.data.frame(val_dt[, ..feat_cols]), type = "response"))
 test_prob_glm <- as.numeric(predict(glm_fit, newdata = as.data.frame(test_dt[, ..feat_cols]), type = "response"))
 
-#验证集阈值&评估测试集
 best_glm <- find_best_threshold(val_dt[[label_col]], val_prob_glm)
-val_best  <- best_glm$best
-best_thr  <- val_best$threshold
-
+val_best <- best_glm$best
+best_thr <- val_best$threshold
 test_best <- calc_metrics(test_dt[[label_col]], test_prob_glm, threshold = best_thr)
 
-cat("\n[GLM] Best threshold on VAL =", best_thr, "\n")
+cat("\n[GLM - FULL] Best threshold on VAL =", best_thr, "\n")
 print(val_best)
 print(test_best)
 
@@ -155,10 +153,518 @@ coef_dt[, abs_z := NULL]
 
 fwrite(coef_dt, file.path(dir_model, "glm_feature_importance.csv"))
 
+#删除弱特征,重新训练相同 GLM,同评估标准,新输出
+p_cut <- 0.05  # 弱特征阈值：可改 0.10 / 0.01
+weak_feats <- coef_dt[is.na(p) | p > p_cut, feature]
+weak_feats <- intersect(weak_feats, feat_cols)
+
+feat_cols_pruned <- setdiff(feat_cols, weak_feats)
+stopifnot(length(feat_cols_pruned) > 0)
+
+cat("\n[DROP WEAK] p_cut =", p_cut, "\n")
+cat("Weak features:", length(weak_feats), "\n")
+cat("Kept features:", length(feat_cols_pruned), "\n")
+
+#把删掉/保留清单保存，便于复现
+fwrite(data.table(feature = weak_feats), file.path(dir_model, "glm_weak_features_drop.csv"))
+fwrite(data.table(feature = feat_cols_pruned), file.path(dir_model, "glm_features_kept_after_drop.csv"))
+
+#重新训练 GLM
+fm2 <- as.formula(paste(label_col, "~", paste(feat_cols_pruned, collapse = " + ")))
+
+glm_fit_pruned <- glm(
+  formula = fm2,
+  data = as.data.frame(train_dt[, c(label_col, feat_cols_pruned, "weight"), with = FALSE]),
+  family = binomial(link = "logit"),
+  weights = weight
+)
+
+val_prob2  <- as.numeric(predict(glm_fit_pruned, newdata = as.data.frame(val_dt[, ..feat_cols_pruned]), type = "response"))
+test_prob2 <- as.numeric(predict(glm_fit_pruned, newdata = as.data.frame(test_dt[, ..feat_cols_pruned]), type = "response"))
+
+best2 <- find_best_threshold(val_dt[[label_col]], val_prob2)
+val_best2 <- best2$best
+thr2 <- val_best2$threshold
+test_best2 <- calc_metrics(test_dt[[label_col]], test_prob2, threshold = thr2)
+
+cat("\n[GLM - PRUNED] Best threshold on VAL =", thr2, "\n")
+print(val_best2)
+print(test_best2)
+
+#输出删弱特征后的结果
+suffix <- paste0("_dropWeak_p", gsub("\\.", "", sprintf("%.2f", p_cut)))
+
+fwrite(best2$scan,  file.path(dir_model, paste0("glm_val_threshold_scan", suffix, ".csv")))
+fwrite(val_best2,   file.path(dir_model, paste0("glm_val_best_metrics",  suffix, ".csv")))
+fwrite(test_best2,  file.path(dir_model, paste0("glm_test_metrics",      suffix, ".csv")))
+
+coef_tab2 <- summary(glm_fit_pruned)$coefficients
+coef_dt2 <- data.table(
+  feature = rownames(coef_tab2),
+  coef = coef_tab2[, 1],
+  se   = coef_tab2[, 2],
+  z    = coef_tab2[, 3],
+  p    = coef_tab2[, 4]
+)
+coef_dt2 <- coef_dt2[feature != "(Intercept)"]
+coef_dt2[, odds_ratio := exp(coef)]
+coef_dt2[, abs_z := abs(z)]
+setorder(coef_dt2, -abs_z)
+coef_dt2[, abs_z := NULL]
+
+fwrite(coef_dt2, file.path(dir_model, paste0("glm_feature_importance", suffix, ".csv")))
+```
+
+```{r}
+#非线性建模
+# 最初特征字典（feature 列）
+dict_path  <- file.path(dir_dict, "feature_dictionary_final.csv")
+label_col <- "label_buy"
+
+#读取数据
+train_dt <- fread(file.path(dir_model, "train_set_final.csv"))
+val_dt   <- fread(file.path(dir_model, "val_set_final.csv"))
+test_dt  <- fread(file.path(dir_model, "test_set_final.csv"))
+
+# 标签标准化成 0/1
+for (DT in list(train_dt, val_dt, test_dt)) {
+  DT[, (label_col) := as.integer(get(label_col))]
+}
+train_dt <- train_dt[get(label_col) %in% c(0L,1L)]
+val_dt   <- val_dt[get(label_col) %in% c(0L,1L)]
+test_dt  <- test_dt[get(label_col) %in% c(0L,1L)]
+
+stopifnot(nrow(train_dt) > 0, nrow(val_dt) > 0, nrow(test_dt) > 0)
+
+#特征列：从“最初字典”取 + 排除非特征列
+keep_cols <- fread(dict_path)$feature
+keep_cols <- intersect(keep_cols, names(train_dt))
+
+leak_cols <- c("ui_buy","ui_buy_rate","ui_buy_1d","ui_buy_2d","ui_buy_3d","ui_buy_4d","ui_buy_5d","ui_buy_6d","ui_buy_7d")
+
+exclude_cols <- c(
+  "user_id","item_id","split", label_col,
+  "u_pref_hour","u_pref_dow","i_cat",
+  "u_first_time","u_last_time","i_first_time","i_last_time",
+  "ui_first_time","ui_last_time","u_label_buy",
+  leak_cols
+)
+
+feat_cols <- setdiff(keep_cols, exclude_cols)
+feat_cols <- feat_cols[sapply(train_dt[, ..feat_cols], is.numeric)]
+feat_cols <- Reduce(intersect, list(feat_cols, names(train_dt), names(val_dt), names(test_dt)))
+
+stopifnot(length(feat_cols) > 0)
+cat("XGBoost using ORIGINAL features:", length(feat_cols), "\n")
+
+#类不平衡：scale_pos_weight
+pos <- train_dt[, sum(get(label_col) == 1L)]
+neg <- train_dt[, sum(get(label_col) == 0L)]
+stopifnot(pos > 0, neg > 0)
+scale_pos_weight <- as.numeric(neg / pos)
+
+cat(sprintf("Train pos=%d neg=%d pos_rate=%.6f scale_pos_weight=%.3f\n",
+            pos, neg, pos/(pos+neg), scale_pos_weight))
+
+
+#构造 DMatrix（稀疏更省内存）
+X_train <- Matrix::Matrix(as.matrix(train_dt[, ..feat_cols]), sparse = TRUE)
+X_val   <- Matrix::Matrix(as.matrix(val_dt[, ..feat_cols]), sparse = TRUE)
+X_test  <- Matrix::Matrix(as.matrix(test_dt[, ..feat_cols]), sparse = TRUE)
+
+dtrain <- xgb.DMatrix(data = X_train, label = train_dt[[label_col]])
+dval   <- xgb.DMatrix(data = X_val,   label = val_dt[[label_col]])
+dtest  <- xgb.DMatrix(data = X_test,  label = test_dt[[label_col]])
+
+
+#训练 XGBoost（非线性）
+params <- list(
+  booster = "gbtree",
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  eta = 0.05,
+  max_depth = 6,
+  min_child_weight = 5,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  lambda = 1.0,
+  alpha = 0.0,
+  scale_pos_weight = scale_pos_weight
+)
+
+set.seed(42)
+xgb_fit <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 2000,
+  watchlist = list(train = dtrain, val = dval),
+  early_stopping_rounds = 80,
+  verbose = 1
+)
+
+#预测 + 用已有评估函数做同标准评估
+val_prob  <- as.numeric(predict(xgb_fit, dval))
+test_prob <- as.numeric(predict(xgb_fit, dtest))
+
+best_obj <- find_best_threshold(val_dt[[label_col]], val_prob)  # 用你的函数
+best_thr <- best_obj$best$threshold
+
+val_best  <- best_obj$best
+test_best <- calc_metrics(test_dt[[label_col]], test_prob, threshold = best_thr)
+
+cat("\n[XGB] Best threshold on VAL:", best_thr, "\n")
+print(val_best)
+print(test_best)
+
+#输出四个文件（和 GLM 同结构）
+
+fwrite(best_obj$scan, file.path(dir_model, "xgb_val_threshold_scan.csv"))
+fwrite(val_best,      file.path(dir_model, "xgb_val_best_metrics.csv"))
+fwrite(test_best,     file.path(dir_model, "xgb_test_metrics.csv"))
+
+# 特征重要性（gain）
+imp <- xgb.importance(model = xgb_fit, feature_names = feat_cols)
+imp_dt <- as.data.table(imp)
+fwrite(imp_dt, file.path(dir_model, "xgb_feature_importance.csv"))
 ```
 
 
 
+```{r}
+glm_model_final   <- glm_fit_pruned
+glm_feat_final    <- feat_cols_pruned
+glm_formula_final <- formula(glm_fit_pruned)
+best_iter         <- xgb_fit$best_iteration
+
+#输出目录 
+dir_diag <- file.path(dir_model, "diagnostics")
+if (!dir.exists(dir_diag)) dir.create(dir_diag, recursive = TRUE)
+
+#辅助函数
+calc_basic_metrics_diag <- function(y_true, y_prob, threshold = 0.5, eps = 1e-15) {
+  y_true <- as.integer(y_true)
+  y_prob <- as.numeric(y_prob)
+
+  auc_val <- tryCatch(
+    as.numeric(pROC::auc(y_true, y_prob)),
+    error = function(e) NA_real_
+  )
+
+  p <- pmax(pmin(y_prob, 1 - eps), eps)
+  logloss <- -mean(y_true * log(p) + (1 - y_true) * log(1 - p))
+
+  pred <- as.integer(y_prob >= threshold)
+  acc <- mean(pred == y_true)
+
+  data.table(
+    AUC = auc_val,
+    LogLoss = logloss,
+    Accuracy = acc
+  )
+}
+
+judge_bias_variance_diag <- function(train_auc, val_auc, train_logloss, val_logloss,
+                                     auc_gap_th = 0.03, auc_low_th = 0.70,
+                                     logloss_gap_th = 0.03) {
+  auc_gap <- train_auc - val_auc
+  ll_gap  <- val_logloss - train_logloss
+
+  diagnosis <- if (is.na(train_auc) || is.na(val_auc)) {
+    "Unavailable"
+  } else if (train_auc < auc_low_th && val_auc < auc_low_th) {
+    "High Bias / Underfitting"
+  } else if (auc_gap > auc_gap_th || ll_gap > logloss_gap_th) {
+    "High Variance / Overfitting"
+  } else {
+    "Relatively Balanced"
+  }
+
+  data.table(
+    train_auc = train_auc,
+    val_auc = val_auc,
+    auc_gap = auc_gap,
+    train_logloss = train_logloss,
+    val_logloss = val_logloss,
+    logloss_gap = ll_gap,
+    diagnosis = diagnosis
+  )
+}
+
+plot_learning_curve_diag <- function(dt_curve, title_txt, out_prefix, out_dir) {
+  p1 <- ggplot(dt_curve, aes(x = train_size)) +
+    geom_line(aes(y = train_logloss, color = "Train LogLoss"), linewidth = 0.9) +
+    geom_point(aes(y = train_logloss, color = "Train LogLoss"), size = 1.6) +
+    geom_line(aes(y = val_logloss, color = "Validation LogLoss"), linewidth = 0.9) +
+    geom_point(aes(y = val_logloss, color = "Validation LogLoss"), size = 1.6) +
+    labs(
+      title = paste0(title_txt, " - Learning Curve (LogLoss)"),
+      x = "Training sample size",
+      y = "LogLoss",
+      color = NULL
+    ) +
+    theme_minimal()
+
+  p2 <- ggplot(dt_curve, aes(x = train_size)) +
+    geom_line(aes(y = train_auc, color = "Train AUC"), linewidth = 0.9) +
+    geom_point(aes(y = train_auc, color = "Train AUC"), size = 1.6) +
+    geom_line(aes(y = val_auc, color = "Validation AUC"), linewidth = 0.9) +
+    geom_point(aes(y = val_auc, color = "Validation AUC"), size = 1.6) +
+    labs(
+      title = paste0(title_txt, " - Learning Curve (AUC)"),
+      x = "Training sample size",
+      y = "AUC",
+      color = NULL
+    ) +
+    theme_minimal()
+
+  ggsave(file.path(out_dir, paste0(out_prefix, "_logloss.png")), p1, width = 8, height = 5, dpi = 150)
+  ggsave(file.path(out_dir, paste0(out_prefix, "_auc.png")), p2, width = 8, height = 5, dpi = 150)
+}
+
+bench_predict_diag <- function(expr_builder, n_rep = 30L, warmup = 5L) {
+  for (i in seq_len(warmup)) expr_builder()
+
+  t_sec <- replicate(
+    n_rep,
+    system.time(expr_builder())[["elapsed"]]
+  )
+
+  data.table(
+    mean_sec = mean(t_sec),
+    sd_sec   = sd(t_sec),
+    min_sec  = min(t_sec),
+    p50_sec  = as.numeric(stats::quantile(t_sec, 0.50)),
+    p95_sec  = as.numeric(stats::quantile(t_sec, 0.95)),
+    max_sec  = max(t_sec)
+  )
+}
+
+#读取
+train_dt_diag <- data.table::copy(train_dt)
+val_dt_diag   <- data.table::copy(val_dt)
+test_dt_diag  <- data.table::copy(test_dt)
+
+#局部重建线性回归模型
+pos_rate_diag <- train_dt_diag[, mean(get(label_col) == 1L)]
+w_pos_diag <- (1 - pos_rate_diag) / pos_rate_diag
+train_dt_diag[, weight := ifelse(get(label_col) == 1L, w_pos_diag, 1.0)]
+
+#局部重建XGboost模型
+X_val_diag  <- Matrix::Matrix(as.matrix(val_dt_diag[, ..feat_cols]), sparse = TRUE)
+X_test_diag <- Matrix::Matrix(as.matrix(test_dt_diag[, ..feat_cols]), sparse = TRUE)
+dval_diag   <- xgb.DMatrix(data = X_val_diag,  label = val_dt_diag[[label_col]])
+dtest_diag  <- xgb.DMatrix(data = X_test_diag, label = test_dt_diag[[label_col]])
+
+#高方差、高偏差、学习曲线
+set.seed(42)
+frac_seq <- c(0.1, 0.2, 0.4, 0.6, 0.8, 1.0)
+
+#线性模型学习曲线
+learning_curve_glm <- rbindlist(lapply(frac_seq, function(fr) {
+  n_take <- max(200L, floor(nrow(train_dt_diag) * fr))
+  n_take <- min(n_take, nrow(train_dt_diag))
+
+  idx <- sample.int(nrow(train_dt_diag), n_take)
+  sub_dt <- train_dt_diag[idx]
+
+  fit_sub <- glm(
+    formula = glm_formula_final,
+    data = as.data.frame(sub_dt[, c(label_col, glm_feat_final, "weight"), with = FALSE]),
+    family = binomial(link = "logit"),
+    weights = weight
+  )
+
+  train_prob <- as.numeric(
+    predict(
+      fit_sub,
+      newdata = as.data.frame(sub_dt[, ..glm_feat_final]),
+      type = "response"
+    )
+  )
+
+  val_prob <- as.numeric(
+    predict(
+      fit_sub,
+      newdata = as.data.frame(val_dt_diag[, ..glm_feat_final]),
+      type = "response"
+    )
+  )
+
+  train_m <- calc_basic_metrics_diag(sub_dt[[label_col]], train_prob)
+  val_m   <- calc_basic_metrics_diag(val_dt_diag[[label_col]], val_prob)
+
+  data.table(
+    model = "GLM",
+    frac = fr,
+    train_size = n_take,
+    train_auc = train_m$AUC,
+    val_auc = val_m$AUC,
+    train_logloss = train_m$LogLoss,
+    val_logloss = val_m$LogLoss
+  )
+}), fill = TRUE)
+
+fwrite(learning_curve_glm, file.path(dir_diag, "glm_learning_curve.csv"))
+plot_learning_curve_diag(learning_curve_glm, "GLM", "glm_learning_curve", dir_diag)
+
+glm_diag <- judge_bias_variance_diag(
+  train_auc = learning_curve_glm[.N, train_auc],
+  val_auc = learning_curve_glm[.N, val_auc],
+  train_logloss = learning_curve_glm[.N, train_logloss],
+  val_logloss = learning_curve_glm[.N, val_logloss]
+)
+glm_diag[, model := "GLM"]
+fwrite(glm_diag, file.path(dir_diag, "glm_bias_variance_diagnosis.csv"))
+
+#XGBoost迭代学习曲线
+xgb_eval <- as.data.table(xgb_fit$evaluation_log)
+
+if (!("iter" %in% names(xgb_eval))) xgb_eval[, iter := .I]
+
+p_xgb_loss <- ggplot(xgb_eval, aes(x = iter)) +
+  geom_line(aes(y = train_logloss, color = "Train LogLoss"), linewidth = 0.9) +
+  geom_line(aes(y = val_logloss, color = "Validation LogLoss"), linewidth = 0.9) +
+  labs(
+    title = "XGBoost - Iteration Learning Curve (LogLoss)",
+    x = "Boosting round",
+    y = "LogLoss",
+    color = NULL
+  ) +
+  theme_minimal()
+
+ggsave(
+  file.path(dir_diag, "xgb_iteration_learning_curve_logloss.png"),
+  p_xgb_loss,
+  width = 8, height = 5, dpi = 150
+)
+
+#XGBoost样本大小学习曲线
+learning_curve_xgb <- rbindlist(lapply(frac_seq, function(fr) {
+  n_take <- max(500L, floor(nrow(train_dt_diag) * fr))
+  n_take <- min(n_take, nrow(train_dt_diag))
+
+  idx <- sample.int(nrow(train_dt_diag), n_take)
+  sub_dt <- train_dt_diag[idx]
+
+  X_sub <- Matrix::Matrix(as.matrix(sub_dt[, ..feat_cols]), sparse = TRUE)
+  dsub  <- xgb.DMatrix(data = X_sub, label = sub_dt[[label_col]])
+
+  pos_sub <- sum(sub_dt[[label_col]] == 1L)
+  neg_sub <- sum(sub_dt[[label_col]] == 0L)
+  spw_sub <- neg_sub / max(pos_sub, 1L)
+
+  fit_sub <- xgb.train(
+    params = modifyList(params, list(scale_pos_weight = spw_sub)),
+    data = dsub,
+    nrounds = best_iter,
+    watchlist = list(train = dsub, val = dval_diag),
+    verbose = 0
+  )
+
+  train_prob <- as.numeric(predict(fit_sub, dsub))
+  val_prob   <- as.numeric(predict(fit_sub, dval_diag))
+
+  train_m <- calc_basic_metrics_diag(sub_dt[[label_col]], train_prob)
+  val_m   <- calc_basic_metrics_diag(val_dt_diag[[label_col]], val_prob)
+
+  data.table(
+    model = "XGBOOST",
+    frac = fr,
+    train_size = n_take,
+    train_auc = train_m$AUC,
+    val_auc = val_m$AUC,
+    train_logloss = train_m$LogLoss,
+    val_logloss = val_m$LogLoss
+  )
+}), fill = TRUE)
+
+fwrite(learning_curve_xgb, file.path(dir_diag, "xgb_learning_curve.csv"))
+plot_learning_curve_diag(learning_curve_xgb, "XGBoost", "xgb_learning_curve", dir_diag)
+
+xgb_diag <- judge_bias_variance_diag(
+  train_auc = learning_curve_xgb[.N, train_auc],
+  val_auc = learning_curve_xgb[.N, val_auc],
+  train_logloss = learning_curve_xgb[.N, train_logloss],
+  val_logloss = learning_curve_xgb[.N, val_logloss]
+)
+xgb_diag[, model := "XGBOOST"]
+fwrite(xgb_diag, file.path(dir_diag, "xgb_bias_variance_diagnosis.csv"))
 
 
+#模型大小计算
+saveRDS(glm_model_final, file.path(dir_diag, "glm_final_model.rds"))
+saveRDS(xgb_fit,         file.path(dir_diag, "xgb_model.rds"))
+
+model_size_dt <- data.table(
+  model = c("GLM", "XGBOOST"),
+  object_size_bytes = c(
+    as.numeric(object.size(glm_model_final)),
+    as.numeric(object.size(xgb_fit))
+  ),
+  rds_size_bytes = c(
+    file.info(file.path(dir_diag, "glm_final_model.rds"))$size,
+    file.info(file.path(dir_diag, "xgb_model.rds"))$size
+  )
+)
+
+model_size_dt[, `:=`(
+  object_size_mb = round(object_size_bytes / 1024^2, 4),
+  rds_size_mb    = round(rds_size_bytes / 1024^2, 4)
+)]
+
+fwrite(model_size_dt, file.path(dir_diag, "model_size_comparison.csv"))
+
+#单样本处理速度
+single_glm_df <- as.data.frame(test_dt_diag[1, ..glm_feat_final])
+
+single_xgb_dm <- xgb.DMatrix(
+  data = Matrix::Matrix(as.matrix(test_dt_diag[1, ..feat_cols]), sparse = TRUE)
+)
+
+batch_n <- min(1024L, nrow(test_dt_diag))
+
+batch_glm_df <- as.data.frame(test_dt_diag[1:batch_n, ..glm_feat_final])
+
+batch_xgb_dm <- xgb.DMatrix(
+  data = Matrix::Matrix(as.matrix(test_dt_diag[1:batch_n, ..feat_cols]), sparse = TRUE)
+)
+
+speed_glm_single <- bench_predict_diag(function() {
+  predict(glm_model_final, newdata = single_glm_df, type = "response")
+})
+
+speed_glm_batch <- bench_predict_diag(function() {
+  predict(glm_model_final, newdata = batch_glm_df, type = "response")
+})
+
+speed_xgb_single <- bench_predict_diag(function() {
+  predict(xgb_fit, single_xgb_dm)
+})
+
+speed_xgb_batch <- bench_predict_diag(function() {
+  predict(xgb_fit, batch_xgb_dm)
+})
+
+inference_speed_dt <- rbindlist(list(
+  cbind(data.table(model = "GLM",     mode = "single_sample", batch_size = 1L),      speed_glm_single),
+  cbind(data.table(model = "GLM",     mode = "batch",         batch_size = batch_n), speed_glm_batch),
+  cbind(data.table(model = "XGBOOST", mode = "single_sample", batch_size = 1L),      speed_xgb_single),
+  cbind(data.table(model = "XGBOOST", mode = "batch",         batch_size = batch_n), speed_xgb_batch)
+), fill = TRUE)
+
+inference_speed_dt[, throughput_sample_per_sec := round(batch_size / p50_sec, 3)]
+fwrite(inference_speed_dt, file.path(dir_diag, "inference_speed_comparison.csv"))
+
+#总结
+summary_dt <- rbindlist(list(glm_diag, xgb_diag), fill = TRUE)
+summary_dt <- merge(
+  summary_dt,
+  model_size_dt[, .(model, object_size_mb, rds_size_mb)],
+  by = "model",
+  all.x = TRUE
+)
+
+fwrite(summary_dt, file.path(dir_diag, "diagnostics_summary.csv"))
+
+```
 
